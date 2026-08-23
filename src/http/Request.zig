@@ -34,70 +34,77 @@ const ParseOptions = struct {
 pub fn parse_headers(
     request: *Request,
     gpa: mem.Allocator,
-    bytes: []const u8,
+    header: []const u8,
     options: ParseOptions,
 ) (OoM || http.Error)!void {
     request.clear(gpa);
-    var total_size: u32 = 0;
+
     var lines = mem.tokenizeAny(
         u8,
-        bytes,
+        header,
         "\r\n",
     );
 
     if (lines.peek() == null) return error.MalformedRequest;
 
-    var parsing_first_line = true;
-    while (lines.next()) |line| {
-        total_size += @intCast(line.len);
+    const status_line = lines.next().?;
 
-        if (total_size > options.max_request_bytes.Usize()) return error.ContentTooLarge;
+    var chunks = mem.tokenizeScalar(
+        u8,
+        status_line,
+        ' ',
+    );
 
-        if (parsing_first_line) {
-            var chunks = mem.tokenizeScalar(
-                u8,
-                line,
-                ' ',
-            );
+    const method_string = chunks.next() orelse
+        return error.MalformedRequest;
 
-            const method_string = chunks.next() orelse
-                return error.MalformedRequest;
-            const method = http.Method.parse(method_string) catch {
-                log.warn("invalid method: {s}", .{method_string});
-                return error.InvalidMethod;
-            };
+    const method: http.Method = try .parse(method_string);
 
-            const uri_string = chunks.next() orelse
-                return error.MalformedRequest;
-            if (uri_string.len >= options.max_uri_bytes.Usize())
-                return error.URITooLong;
-            if (uri_string[0] != '/') return error.MalformedRequest;
+    const uri_string = chunks.next() orelse
+        return error.MalformedRequest;
 
-            const version_string = chunks.next() orelse
-                return error.MalformedRequest;
-            if (!mem.eql(u8, version_string, "HTTP/1.1"))
-                return error.HTTPVersionNotSupported;
-            request.set(.{ .method = method, .uri = uri_string });
+    if (uri_string.len >= options.max_uri_bytes.Usize())
+        return error.URITooLong;
 
-            // There shouldn't be anything else.
-            if (chunks.next() != null) return http.Error.MalformedRequest;
-            parsing_first_line = false;
-        } else {
-            var header_iter = mem.tokenizeScalar(
-                u8,
-                line,
-                ':',
-            );
-            const key = header_iter.next() orelse
-                return error.MalformedRequest;
-            const value = mem.trimStart(
-                u8,
-                header_iter.rest(),
-                &.{' '},
-            );
-            if (value.len == 0) return error.MalformedRequest;
-            try request.headers.put(gpa, key, value);
-        }
+    if (uri_string[0] != '/') return error.MalformedRequest;
+
+    const version_string = chunks.next() orelse
+        return error.MalformedRequest;
+
+    if (!mem.eql(u8, version_string, "HTTP/1.1"))
+        return error.HTTPVersionNotSupported;
+
+    request.set(
+        .{ .method = method, .uri = uri_string },
+    );
+
+    // There shouldn't be anything else.
+    if (chunks.next() != null) return http.Error.MalformedRequest;
+
+    var total_size: usize = 0;
+    while (lines.next()) |line| : ({
+        total_size += line.len;
+    }) {
+        if (total_size > options.max_request_bytes.Usize())
+            return error.ContentTooLarge;
+
+        var header_iter = mem.tokenizeScalar(
+            u8,
+            line,
+            ':',
+        );
+        const key = header_iter.next() orelse
+            return error.MalformedRequest;
+
+        const value = mem.trimStart(
+            u8,
+            header_iter.rest(),
+            " ",
+        );
+
+        if (value.len == 0) return error.MalformedRequest;
+
+        try request.headers.put(gpa, key, value);
     }
 
     if (request.headers.get("Cookie")) |cookies|
@@ -317,7 +324,7 @@ const assert = std.debug.assert;
 const testing = std.testing;
 const OoM = mem.Allocator.Error;
 
-const zzz = @import("../root.zig");
+const zzz = @import("zzz");
 const core = zzz.core;
 const string_map = core.string_map;
 const http = zzz.http;
