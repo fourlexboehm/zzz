@@ -268,7 +268,7 @@ const meta = std.meta;
 const assert = std.debug.assert;
 const builtin = @import("builtin");
 
-const zzz = @import("../../root.zig");
+const zzz = @import("zzz");
 const http = zzz.http;
 const core = zzz.core;
 const Middleware = @import("Middleware.zig");

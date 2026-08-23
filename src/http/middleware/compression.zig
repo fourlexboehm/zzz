@@ -1,18 +1,3 @@
-const std = @import("std");
-const flate = std.compress.flate;
-
-const zzz = @import("../../root.zig");
-const http = zzz.http;
-const Router = http.Router;
-const Middleware = Router.Middleware;
-
-const Kind = union(enum) {
-    gzip: struct {
-        container: flate.Container = .gzip,
-        level: flate.Compress.Options = .default,
-    },
-};
-
 // TODO: add examples to excercis these
 /// Compression Middleware.
 ///
@@ -62,3 +47,18 @@ pub fn Compression(comptime compression: Kind) Middleware.Layer {
 
     return Middleware.init({}, func).layer();
 }
+
+const Kind = union(enum) {
+    gzip: struct {
+        container: flate.Container = .gzip,
+        level: flate.Compress.Options = .default,
+    },
+};
+
+const std = @import("std");
+const flate = std.compress.flate;
+
+const zzz = @import("zzz");
+const http = zzz.http;
+const Router = http.Router;
+const Middleware = Router.Middleware;

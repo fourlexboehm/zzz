@@ -100,7 +100,7 @@ const Bucket = struct {
 const std = @import("std");
 const mem = std.mem;
 
-const zzz = @import("../../root.zig");
+const zzz = @import("zzz");
 const http = zzz.http;
 const Router = zzz.http.Router;
 const Middleware = Router.Middleware;

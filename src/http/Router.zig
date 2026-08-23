@@ -71,7 +71,7 @@ const log = std.log.scoped(.@"zzz/http/router");
 const std = @import("std");
 const mem = std.mem;
 
-const zzz = @import("../root.zig");
+const zzz = @import("zzz");
 const string_map = zzz.core.string_map;
 const http = zzz.http;
 const Context = http.Context;

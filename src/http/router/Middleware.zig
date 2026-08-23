@@ -52,7 +52,7 @@ const log = std.log.scoped(.@"zzz/router/middleware");
 const std = @import("std");
 const assert = std.debug.assert;
 
-const zzz = @import("../../root.zig");
+const zzz = @import("zzz");
 const core = zzz.core;
 const http = zzz.http;
 const Respond = http.Respond;

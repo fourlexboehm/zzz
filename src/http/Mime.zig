@@ -442,5 +442,5 @@ const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
 
-const zzz = @import("../root.zig");
+const zzz = @import("zzz");
 const core = zzz.core;

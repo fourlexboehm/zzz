@@ -21,10 +21,11 @@ const std = @import("std");
 const mem = std.mem;
 const Io = std.Io;
 
-const zzz = @import("../root.zig");
+const zzz = @import("zzz");
 const core = zzz.core;
 const string_map = core.string_map;
 const http = zzz.http;
 const Runtime = zzz.tardy.Runtime;
 const Secsock = zzz.Secsock;
+
 const Trie = @import("router/Trie.zig");

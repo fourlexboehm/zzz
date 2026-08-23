@@ -578,7 +578,7 @@ const fmt = std.fmt;
 const debug = std.debug;
 const testing = std.testing;
 
-const zzz = @import("../../root.zig");
+const zzz = @import("zzz");
 const http = zzz.http;
 const string_map = zzz.core.string_map;
 const form = zzz.http.form;

@@ -243,6 +243,6 @@ const fmt = std.fmt;
 const debug = std.debug;
 const testing = std.testing;
 
-const zzz = @import("../root.zig");
+const zzz = @import("zzz");
 const string_map = zzz.core.string_map;
 const Context = @import("Context.zig");

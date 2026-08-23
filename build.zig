@@ -18,6 +18,7 @@ pub fn build(b: *Build) void {
             .{ .name = "secsock", .module = secsock },
         },
     });
+    zzz.addImport("zzz", zzz);
 
     const all = b.step("all", "Build all Zzz examples");
 
@@ -45,13 +46,16 @@ pub fn build(b: *Build) void {
         .all = all,
     });
 
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("src/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_mod.addImport("zzz", zzz);
+
     const tests = b.addTest(.{
         .name = "tests",
-        .root_module = b.addModule("tests", .{
-            .root_source_file = b.path("src/tests.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = test_mod,
     });
 
     const run_test = b.addRunArtifact(tests);

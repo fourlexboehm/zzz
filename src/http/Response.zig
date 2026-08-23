@@ -81,7 +81,7 @@ const std = @import("std");
 const mem = std.mem;
 const Io = std.Io;
 
-const zzz = @import("../root.zig");
+const zzz = @import("zzz");
 const tardy = zzz.tardy;
 const http = zzz.http;
 const string_map = zzz.core.string_map;

@@ -22,6 +22,6 @@ test "zzz unit tests" {
     _ = http.Router.Trie;
 }
 
-const zzz = @import("root.zig");
+const zzz = @import("zzz");
 const core = zzz.core;
 const http = zzz.http;

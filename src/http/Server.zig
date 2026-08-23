@@ -622,7 +622,7 @@ const Io = std.Io;
 const builtin = @import("builtin");
 const tag = builtin.os.tag;
 
-const zzz = @import("../root.zig");
+const zzz = @import("zzz");
 const zcore = zzz.core;
 const string_map = zcore.string_map;
 const tardy = zzz.tardy;

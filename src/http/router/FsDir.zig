@@ -128,7 +128,7 @@ const log = std.log.scoped(.@"zzz/http/router");
 const std = @import("std");
 const mem = std.mem;
 
-const zzz = @import("../../root.zig");
+const zzz = @import("zzz");
 const tardy = zzz.tardy;
 const http = zzz.http;
 const fs = tardy.fs;

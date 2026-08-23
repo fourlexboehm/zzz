@@ -72,7 +72,7 @@ const std = @import("std");
 const mem = std.mem;
 const Writer = std.Io.Writer;
 
-const zzz = @import("../root.zig");
+const zzz = @import("zzz");
 const http = zzz.http;
 const tardy = zzz.tardy;
 const Secsock = zzz.Secsock;
