@@ -3,7 +3,7 @@ pub const Response = @This();
 status: ?Status = null,
 mime: ?Mime = null,
 body: ?[]const u8 = null,
-headers: string_map.AnyCase,
+headers: http.Headers,
 
 // TODO: there shouldn't be a need for this, we should be able to use
 // reponse everywhere or update it to the needed use cases
@@ -84,7 +84,6 @@ const Io = std.Io;
 const zzz = @import("zzz");
 const tardy = zzz.tardy;
 const http = zzz.http;
-const string_map = zzz.core.string_map;
 const Date = @import("Date.zig");
 const Mime = @import("Mime.zig");
 const Status = @import("status.zig").Status;

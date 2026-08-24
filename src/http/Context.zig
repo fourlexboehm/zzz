@@ -15,7 +15,7 @@ tls: *Secsock,
 /// Slice of the URL Slug Captures
 captures: []const Trie.Capture,
 /// Map of the KV Query pairs in the URL
-queries: *const string_map.AnyCase,
+queries: *const http.Queries,
 
 const std = @import("std");
 const mem = std.mem;
@@ -23,7 +23,6 @@ const Io = std.Io;
 
 const zzz = @import("zzz");
 const core = zzz.core;
-const string_map = core.string_map;
 const http = zzz.http;
 const Runtime = zzz.tardy.Runtime;
 const Secsock = zzz.Secsock;

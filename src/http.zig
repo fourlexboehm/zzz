@@ -11,6 +11,14 @@ pub const Router = @import("http/Router.zig");
 pub const Server = @import("http/Server.zig");
 pub const SSE = @import("http/SSE.zig");
 pub const Status = @import("http/status.zig").Status;
+pub const Headers = @import("http/header.zig").Headers;
+// https://datatracker.ietf.org/doc/html/rfc3986/#section-6.2.2.1
+// Queries are case sensitive by default
+pub const Queries = std.StringHashMapUnmanaged([]const u8);
+
+pub const Version = enum {
+    @"HTTP/1.1",
+};
 
 pub const Respond = enum {
     // When we are returning a real HTTP request, we use this.
@@ -34,6 +42,9 @@ pub const Error = error{
     ContentTooLarge,
     MalformedRequest,
     InvalidMethod,
+    InvalidURI,
     URITooLong,
-    HTTPVersionNotSupported,
+    UnSupportedHTTPVersion,
 };
+
+const std = @import("std");

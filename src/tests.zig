@@ -1,6 +1,5 @@
 test "zzz unit tests" {
     // Core
-    _ = core.string_map.AnyCase;
     _ = core.Pseudoslice;
     _ = core.Storage;
 
@@ -15,6 +14,7 @@ test "zzz unit tests" {
     _ = http.SSE;
     _ = http.Status;
     _ = http.form;
+    _ = http.Headers;
 
     // Router
     _ = http.Router;

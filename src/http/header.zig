@@ -1,35 +1,36 @@
-pub const AnyCase = std.HashMapUnmanaged(
+pub const Headers = std.HashMapUnmanaged(
     []const u8,
     []const u8,
     // needed because the comparision ignores case
-    Context,
+    CaseInsensitive,
     std.hash_map.default_max_load_percentage,
 );
 
-const Context = struct {
-    pub fn hash(_: Context, key: []const u8) u64 {
+// https://datatracker.ietf.org/doc/html/rfc9110#section-5.1
+const CaseInsensitive = struct {
+    pub fn hash(_: @This(), key: []const u8) u64 {
         var hasher: std.hash.Wyhash = .init(0);
         for (key) |byte| hasher.update(mem.asBytes(&ascii.toLower(byte)));
         return hasher.final();
     }
 
-    pub fn eql(_: Context, key_a: []const u8, key_b: []const u8) bool {
+    pub fn eql(_: @This(), key_a: []const u8, key_b: []const u8) bool {
         return ascii.eqlIgnoreCase(key_a, key_b);
     }
 };
 
-test "string_map.AnyCase: Add Stuff" {
+test "http.Headers: Add Stuff" {
     const gpa = testing.allocator;
-    var map: AnyCase = .empty;
-    defer map.deinit(gpa);
+    var header: Headers = .empty;
+    defer header.deinit(gpa);
 
-    try map.put(gpa, "Content-Length", "100");
-    try map.put(gpa, "Host", "localhost:9999");
+    try header.put(gpa, "Content-Length", "100");
+    try header.put(gpa, "Host", "localhost:9999");
 
-    const content_length = map.get("Content-length");
+    const content_length = header.get("Content-length");
     try testing.expect(content_length != null);
 
-    const host = map.get("host");
+    const host = header.get("host");
     try testing.expect(host != null);
 }
 

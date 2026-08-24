@@ -74,7 +74,7 @@ pub fn get_bundle(
     gpa: mem.Allocator,
     path: []const u8,
     captures: []Capture,
-    queries: *string_map.AnyCase,
+    queries: *http.Queries,
 ) !?Bundle {
     var capture_idx: usize = 0;
     const query_pos = mem.findScalar(u8, path, '?');
@@ -281,7 +281,7 @@ pub const Node = struct {
 pub const Bundle = struct {
     route: Route,
     captures: []Capture,
-    queries: *string_map.AnyCase,
+    queries: *http.Queries,
     duped: []const []const u8,
 };
 
@@ -320,7 +320,7 @@ test "Routing with Paths" {
     });
     defer s.deinit(gpa);
 
-    var q: string_map.AnyCase = .empty;
+    var q: http.Queries = .empty;
     defer q.deinit(gpa);
 
     var captures: [8]Capture = @splat(undefined);
@@ -379,7 +379,7 @@ test "Routing with Remaining" {
     });
     defer s.deinit(gpa);
 
-    var q: string_map.AnyCase = .empty;
+    var q: http.Queries = .empty;
     defer q.deinit(gpa);
 
     var captures: [8]Capture = @splat(undefined);
@@ -467,7 +467,7 @@ test "Routing with Queries" {
     });
     defer s.deinit(gpa);
 
-    var q: string_map.AnyCase = .empty;
+    var q: http.Queries = .empty;
     defer q.deinit(gpa);
 
     var captures: [8]Capture = @splat(undefined);
@@ -580,7 +580,6 @@ const testing = std.testing;
 
 const zzz = @import("zzz");
 const http = zzz.http;
-const string_map = zzz.core.string_map;
 const form = zzz.http.form;
 const Middleware = @import("Middleware.zig");
 const Route = @import("Route.zig");

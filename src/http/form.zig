@@ -2,7 +2,7 @@
 pub fn Form(comptime T: type) type {
     return struct {
         pub fn parse(ctx: *const Context) !T {
-            var form: string_map.AnyCase = .empty;
+            var form: Value = .empty;
             defer {
                 var it = form.iterator();
                 while (it.next()) |entry| {
@@ -34,7 +34,7 @@ pub fn Query(comptime T: type) type {
 fn parse_struct(
     gpa: mem.Allocator,
     comptime T: type,
-    map: *const string_map.AnyCase,
+    form: *const Value,
 ) !T {
     var ret: T = undefined;
     debug.assert(@typeInfo(T) == .@"struct");
@@ -44,7 +44,7 @@ fn parse_struct(
         struct_info.field_names,
         struct_info.field_attrs,
     ) |field_type, field_name, field_attrs| {
-        const entry = map.getEntry(field_name);
+        const entry = form.getEntry(field_name);
 
         if (entry) |e| {
             @field(ret, field_name) = try parse_from(
@@ -94,7 +94,7 @@ fn parse_from(
 
 fn construct_map_from_body(
     gpa: mem.Allocator,
-    form: *string_map.AnyCase,
+    form: *Value,
     body: []const u8,
 ) !void {
     var pairs = mem.splitScalar(u8, body, '&');
@@ -164,13 +164,17 @@ pub fn decode_alloc(gpa: mem.Allocator, input: []const u8) ![]const u8 {
     return list.toOwnedSlice(gpa);
 }
 
+// https://datatracker.ietf.org/doc/html/rfc1866#section-8.2.1
+// Casing not explicitly stated so keep key as-is
+const Value = std.StringHashMapUnmanaged([]const u8);
+
 test "FormData: Parsing from Body" {
     const UserRole = enum { admin, visitor };
     const User = struct { id: u32, name: []const u8, age: u8, role: UserRole };
     const body: []const u8 = "id=10&name=John&age=12&role=visitor";
 
     const gpa = testing.allocator;
-    var form: string_map.AnyCase = .empty;
+    var form: Value = .empty;
     defer {
         var it = form.iterator();
         while (it.next()) |entry| {
@@ -196,7 +200,7 @@ test "FormData: Parsing Missing Fields" {
 
     const gpa = testing.allocator;
 
-    var form: string_map.AnyCase = .empty;
+    var form: Value = .empty;
     defer {
         var it = form.iterator();
         while (it.next()) |entry| {
@@ -216,7 +220,7 @@ test "FormData: Parsing Missing Value" {
     const body: []const u8 = "abc=abc&id=";
 
     const gpa = testing.allocator;
-    var form: string_map.AnyCase = .empty;
+    var form: Value = .empty;
     defer {
         var it = form.iterator();
         while (it.next()) |entry| {
@@ -244,5 +248,4 @@ const debug = std.debug;
 const testing = std.testing;
 
 const zzz = @import("zzz");
-const string_map = zzz.core.string_map;
 const Context = @import("Context.zig");

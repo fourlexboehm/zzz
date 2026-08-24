@@ -2,8 +2,8 @@ pub const Request = @This();
 
 method: ?http.Method = null,
 uri: ?[]const u8 = null,
-version: ?std.http.Version = .@"HTTP/1.1",
-headers: string_map.AnyCase,
+version: ?http.Version = .@"HTTP/1.1",
+headers: http.Headers,
 cookies: Cookie.Map,
 body: ?[]const u8 = null,
 
@@ -47,11 +47,11 @@ pub fn parse_headers(
 
     if (lines.peek() == null) return error.MalformedRequest;
 
-    const status_line = lines.next().?;
+    const request_line = lines.next().?;
 
     var chunks = mem.tokenizeScalar(
         u8,
-        status_line,
+        request_line,
         ' ',
     );
 
@@ -72,14 +72,14 @@ pub fn parse_headers(
         return error.MalformedRequest;
 
     if (!mem.eql(u8, version_string, "HTTP/1.1"))
-        return error.HTTPVersionNotSupported;
+        return error.UnSupportedHTTPVersion;
 
     request.set(
         .{ .method = method, .uri = uri_string },
     );
 
     // There shouldn't be anything else.
-    if (chunks.next() != null) return http.Error.MalformedRequest;
+    if (chunks.next() != null) return error.MalformedRequest;
 
     var total_size: usize = 0;
     while (lines.next()) |line| : ({
@@ -108,7 +108,7 @@ pub fn parse_headers(
     }
 
     if (request.headers.get("Cookie")) |cookies|
-        try request.cookies.parse_from_header(gpa, cookies);
+        try request.cookies.parse(gpa, cookies);
 }
 
 pub const SetOptions = struct {
@@ -284,12 +284,12 @@ test "Expect Incorrect HTTP Version" {
         },
     );
     try testing.expectError(
-        error.HTTPVersionNotSupported,
+        error.UnSupportedHTTPVersion,
         err,
     );
 }
 
-test "Malformed string_map.AnyCase" {
+test "Malformed Request" {
     const request_text =
         \\GET / HTTP/1.1
         \\Host: localhost:9862
@@ -326,6 +326,5 @@ const OoM = mem.Allocator.Error;
 
 const zzz = @import("zzz");
 const core = zzz.core;
-const string_map = core.string_map;
 const http = zzz.http;
 const Cookie = @import("Cookie.zig");
