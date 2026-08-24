@@ -24,7 +24,7 @@ pub fn get_bundle_from_host(
     gpa: mem.Allocator,
     path: []const u8,
     captures: []Trie.Capture,
-    queries: *string_map.AnyCase,
+    queries: *http.Queries,
 ) !Trie.Bundle {
     queries.clearRetainingCapacity();
 
@@ -72,7 +72,6 @@ const std = @import("std");
 const mem = std.mem;
 
 const zzz = @import("zzz");
-const string_map = zzz.core.string_map;
 const http = zzz.http;
 const Context = http.Context;
 const Mime = http.Mime;

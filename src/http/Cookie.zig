@@ -121,17 +121,13 @@ pub const Map = struct {
         return map.map.iterator();
     }
 
-    // For parsing request cookies (simple key=value pairs)
-    pub fn parse_from_header(
-        map: *Map,
-        gpa: mem.Allocator,
-        cookie_header: []const u8,
-    ) !void {
+    /// For parsing request cookies (simple key=value pairs)
+    pub fn parse(map: *Map, gpa: mem.Allocator, cookies: []const u8) !void {
         map.clear(gpa);
 
         var pairs = mem.splitSequence(
             u8,
-            cookie_header,
+            cookies,
             "; ",
         );
         while (pairs.next()) |pair| {
@@ -165,7 +161,7 @@ test "Cookie: Header Parsing" {
     var cookie_map: Cookie.Map = .empty;
     defer cookie_map.deinit(gpa);
 
-    try cookie_map.parse_from_header(
+    try cookie_map.parse(
         gpa,
         "sessionId=abc123; java=slop; foo=bar=baz",
     );

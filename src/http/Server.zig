@@ -607,7 +607,7 @@ pub const Provision = struct {
     arena: std.heap.ArenaAllocator,
     storage: zcore.Storage,
     captures: []Trie.Capture,
-    queries: string_map.AnyCase,
+    queries: http.Queries,
     request: http.Request,
     response: http.Response,
 };
@@ -624,7 +624,6 @@ const tag = builtin.os.tag;
 
 const zzz = @import("zzz");
 const zcore = zzz.core;
-const string_map = zcore.string_map;
 const tardy = zzz.tardy;
 const Coroutine = tardy.Coroutine;
 const tcore = tardy.core;
