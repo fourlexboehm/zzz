@@ -7,5 +7,3 @@ pub const core = @import("core.zig");
 /// HyperText Transfer Protocol.
 /// Supports: HTTP/1.1
 pub const http = @import("http.zig");
-/// WebSocket Protocal
-pub const WebSocket = @import("websocket.zig");
