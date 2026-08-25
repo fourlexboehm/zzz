@@ -225,7 +225,7 @@ pub fn mainLoop(
                     "\r\n\r\n",
                 )) |header_end| {
                     const real_header_end = header_end + 4;
-                    try provision.request.parse_headers(
+                    try provision.request.headers.parse(
                         rt.gpa,
                         // Add 4 to account for the actual header end sequence.
                         provision.zc_recv_buffer.subslice(
@@ -406,7 +406,7 @@ pub fn mainLoop(
             const body = provision.response.body orelse "";
             const content_length = body.len;
 
-            try provision.response.headers_into_writer(
+            try provision.response.writeHeaders(
                 &provision.header_writer,
                 content_length,
             );

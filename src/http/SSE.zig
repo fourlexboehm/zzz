@@ -16,7 +16,7 @@ pub fn init(ctx: *const http.Context) !SSE {
     var writer: Writer.Allocating = .init(ctx.arena);
     errdefer writer.deinit();
 
-    try ctx.response.headers_into_writer(
+    try ctx.response.writeHeaders(
         ctx.header_writer,
         null,
     );

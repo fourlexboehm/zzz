@@ -26,98 +26,7 @@ pub fn clear(request: *Request, gpa: mem.Allocator) void {
     request.headers.clearRetainingCapacity();
 }
 
-const ParseOptions = struct {
-    max_request_bytes: core.Size,
-    max_uri_bytes: core.Size,
-};
-
-pub fn parse_headers(
-    request: *Request,
-    gpa: mem.Allocator,
-    header: []const u8,
-    options: ParseOptions,
-) (OoM || http.Error)!void {
-    request.clear(gpa);
-
-    var lines = mem.tokenizeAny(
-        u8,
-        header,
-        "\r\n",
-    );
-
-    if (lines.peek() == null) return error.MalformedRequest;
-
-    const request_line = lines.next().?;
-
-    var chunks = mem.tokenizeScalar(
-        u8,
-        request_line,
-        ' ',
-    );
-
-    const method_string = chunks.next() orelse
-        return error.MalformedRequest;
-
-    const method: http.Method = try .parse(method_string);
-
-    const uri_string = chunks.next() orelse
-        return error.MalformedRequest;
-
-    if (uri_string.len >= options.max_uri_bytes.Usize())
-        return error.URITooLong;
-
-    if (uri_string[0] != '/') return error.MalformedRequest;
-
-    const version_string = chunks.next() orelse
-        return error.MalformedRequest;
-
-    if (!mem.eql(u8, version_string, "HTTP/1.1"))
-        return error.UnSupportedHTTPVersion;
-
-    request.set(
-        .{ .method = method, .uri = uri_string },
-    );
-
-    // There shouldn't be anything else.
-    if (chunks.next() != null) return error.MalformedRequest;
-
-    var total_size: usize = 0;
-    while (lines.next()) |line| : ({
-        total_size += line.len;
-    }) {
-        if (total_size > options.max_request_bytes.Usize())
-            return error.ContentTooLarge;
-
-        var header_iter = mem.tokenizeScalar(
-            u8,
-            line,
-            ':',
-        );
-        const key = header_iter.next() orelse
-            return error.MalformedRequest;
-
-        const value = mem.trimStart(
-            u8,
-            header_iter.rest(),
-            " ",
-        );
-
-        if (value.len == 0) return error.MalformedRequest;
-
-        try request.headers.put(gpa, key, value);
-    }
-
-    if (request.headers.get("Cookie")) |cookies|
-        try request.cookies.parse(gpa, cookies);
-}
-
-pub const SetOptions = struct {
-    method: ?http.Method = null,
-    uri: ?[]const u8 = null,
-    body: ?[]const u8 = null,
-};
-
-pub fn set(request: *Request, options: SetOptions) void {
+pub fn set(request: *Request, options: Options) void {
     if (options.method) |method| {
         request.method = method;
     }
@@ -151,7 +60,7 @@ test "Parse Request" {
     var request: Request = .empty;
     defer request.deinit(gpa);
 
-    try request.parse_headers(gpa, request_text[0..], .{
+    try request.headers.parse(gpa, request_text[0..], .{
         .max_request_bytes = .KiB(1),
         .max_uri_bytes = .Bytes(256),
     });
@@ -191,7 +100,7 @@ test "Expect ContentTooLong Error" {
     var request: Request = .empty;
     defer request.deinit(gpa);
 
-    const err = request.parse_headers(
+    const err = request.headers.parse(
         gpa,
         request_text[0..],
         .{
@@ -222,7 +131,7 @@ test "Expect URITooLong Error" {
     var request: Request = .empty;
     defer request.deinit(gpa);
 
-    const err = request.parse_headers(
+    const err = request.headers.parse(
         gpa,
         request_text[0..],
         .{
@@ -249,7 +158,7 @@ test "Expect Malformed when URI missing /" {
     var request: Request = .empty;
     defer request.deinit(gpa);
 
-    const err = request.parse_headers(
+    const err = request.headers.parse(
         gpa,
         request_text[0..],
         .{
@@ -275,7 +184,7 @@ test "Expect Incorrect HTTP Version" {
     var request: Request = .empty;
     defer request.deinit(gpa);
 
-    const err = request.parse_headers(
+    const err = request.headers.parse(
         gpa,
         request_text[0..],
         .{
@@ -301,7 +210,7 @@ test "Malformed Request" {
     var request: Request = .empty;
     defer request.deinit(gpa);
 
-    const err = request.parse_headers(
+    const err = request.headers.parse(
         gpa,
         request_text[0..],
         .{
@@ -314,6 +223,12 @@ test "Malformed Request" {
         err,
     );
 }
+
+const Options = struct {
+    method: ?http.Method = null,
+    uri: ?[]const u8 = null,
+    body: ?[]const u8 = null,
+};
 
 const log = std.log.scoped(.@"zzz/http/request");
 

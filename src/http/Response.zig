@@ -42,7 +42,7 @@ pub fn clear(response: *Response) void {
     response.headers.clearRetainingCapacity();
 }
 
-pub fn headers_into_writer(
+pub fn writeHeaders(
     response: *Response,
     writer: *Io.Writer,
     content_length: ?usize,

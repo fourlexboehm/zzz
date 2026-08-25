@@ -74,7 +74,7 @@ fn fs_dir_handler(ctx: *const http.Context, dir: fs.Dir) !http.Respond {
     response.status = .OK;
     response.mime = mime;
 
-    response.headers_into_writer(
+    response.writeHeaders(
         ctx.header_writer,
         stat.size,
     ) catch |err| switch (err) {
