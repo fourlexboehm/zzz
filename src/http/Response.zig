@@ -47,8 +47,8 @@ pub fn writeHeaders(
     writer: *Io.Writer,
     content_length: ?usize,
 ) !void {
-    // Status Line
     const status = response.status.?;
+    // Status Line
     try writer.print(
         "HTTP/1.1 {d} {t}\r\n",
         .{ status, status },

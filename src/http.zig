@@ -11,7 +11,7 @@ pub const Router = @import("http/Router.zig");
 pub const Server = @import("http/Server.zig");
 pub const SSE = @import("http/SSE.zig");
 pub const Status = @import("http/status.zig").Status;
-pub const Headers = @import("http/Headers.zig");
+pub const Headers = @import("http/header.zig").Headers;
 // https://datatracker.ietf.org/doc/html/rfc3986/#section-6.2.2.1
 // Queries are case sensitive by default
 pub const Queries = std.StringHashMapUnmanaged([]const u8);

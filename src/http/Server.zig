@@ -178,14 +178,13 @@ pub fn mainLoop(
         config,
     ) catch unreachable;
 
-    var state: State = .{ .request = .header };
-
     provision.recv_slice = try provision.zc_recv_buffer.get_write_area(
         rt.gpa,
         config.socket_buffer_size.Usize(),
     );
 
     var keepalive_count: u16 = 0;
+    var state: State = .{ .request = .header };
 
     http_loop: while (true) switch (state) {
         .request => |*kind| switch (kind.*) {
@@ -225,7 +224,7 @@ pub fn mainLoop(
                     "\r\n\r\n",
                 )) |header_end| {
                     const real_header_end = header_end + 4;
-                    try provision.request.headers.parse(
+                    try provision.request.parse(
                         rt.gpa,
                         // Add 4 to account for the actual header end sequence.
                         provision.zc_recv_buffer.subslice(
