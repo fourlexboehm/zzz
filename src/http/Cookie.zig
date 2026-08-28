@@ -85,40 +85,40 @@ pub fn to_string_alloc(cookie: Cookie, gpa: mem.Allocator) ![]const u8 {
 }
 
 pub const Map = struct {
-    map: std.StringHashMapUnmanaged([]const u8),
+    cookies: std.StringHashMapUnmanaged([]const u8),
 
     pub const empty: Map = .{
-        .map = .empty,
+        .cookies = .empty,
     };
 
     pub fn deinit(map: *Map, gpa: mem.Allocator) void {
-        var iter = map.map.iterator();
+        var iter = map.cookies.iterator();
         while (iter.next()) |entry| {
             gpa.free(entry.key_ptr.*);
             gpa.free(entry.value_ptr.*);
         }
-        map.map.deinit(gpa);
+        map.cookies.deinit(gpa);
     }
 
     pub fn clear(map: *Map, gpa: mem.Allocator) void {
-        var iter = map.map.iterator();
+        var iter = map.cookies.iterator();
         while (iter.next()) |entry| {
             gpa.free(entry.key_ptr.*);
             gpa.free(entry.value_ptr.*);
         }
-        map.map.clearRetainingCapacity();
+        map.cookies.clearRetainingCapacity();
     }
 
     pub fn get(map: Map, name: []const u8) ?[]const u8 {
-        return map.map.get(name);
+        return map.cookies.get(name);
     }
 
     pub fn count(map: Map) usize {
-        return map.map.count();
+        return map.cookies.count();
     }
 
     pub fn iterator(map: *const Map) std.StringHashMapUnmanaged([]const u8).Iterator {
-        return map.map.iterator();
+        return map.cookies.iterator();
     }
 
     /// For parsing request cookies (simple key=value pairs)
@@ -144,7 +144,7 @@ pub const Map = struct {
             const value_dup = try gpa.dupe(u8, value);
             errdefer gpa.free(value_dup);
 
-            if (try map.map.fetchPut(
+            if (try map.cookies.fetchPut(
                 gpa,
                 key_dup,
                 value_dup,

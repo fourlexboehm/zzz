@@ -1,8 +1,8 @@
 pub const Server = @This();
 
-config: Config,
+config: zzz.Config,
 
-pub fn init(config: Config) Server {
+pub fn init(config: zzz.Config) Server {
     return .{ .config = config };
 }
 
@@ -41,6 +41,11 @@ pub fn serve(
     // initialize first batch of provisions :)
     for (provision_pool.items) |*provision| {
         provision.initalized = true;
+        provision.queries = .empty;
+        provision.storage = .empty;
+        provision.request = .empty;
+        provision.response = .empty;
+
         provision.zc_recv_buffer = try .init(
             rt.gpa,
             server.config.socket_buffer_size.Usize(),
@@ -61,10 +66,15 @@ pub fn serve(
         errdefer rt.gpa.free(provision.captures);
 
         provision.arena = .init(rt.gpa);
-        provision.queries = .empty;
-        provision.storage = .empty;
-        provision.request = .empty;
-        provision.response = .empty;
+
+        try provision.request.headers.ensureTotalCapacity(
+            rt.gpa,
+            server.config.max_header_fields_count,
+        );
+        try provision.response.headers.ensureTotalCapacity(
+            rt.gpa,
+            server.config.max_header_fields_count,
+        );
     }
 
     try rt.spawn(
@@ -84,7 +94,7 @@ pub fn serve(
 
 pub fn mainLoop(
     rt: *Runtime,
-    config: Config,
+    config: zzz.Config,
     router: *const Router,
     tls: *const Secsock,
     provisions: *pool.Pool(Provision),
@@ -145,6 +155,13 @@ pub fn mainLoop(
     // otherwise, it should be initalized.
     if (!provision.initalized) {
         log.debug("initalizing new provision", .{});
+
+        provision.initalized = true;
+        provision.queries = .empty;
+        provision.storage = .empty;
+        provision.request = .empty;
+        provision.response = .empty;
+
         provision.zc_recv_buffer = try .init(
             rt.gpa,
             config.socket_buffer_size.Usize(),
@@ -165,11 +182,15 @@ pub fn mainLoop(
         errdefer rt.gpa.free(provision.captures);
 
         provision.arena = .init(rt.gpa);
-        provision.queries = .empty;
-        provision.storage = .empty;
-        provision.request = .empty;
-        provision.response = .empty;
-        provision.initalized = true;
+
+        try provision.request.headers.ensureTotalCapacity(
+            rt.gpa,
+            config.max_header_fields_count,
+        );
+        try provision.response.headers.ensureTotalCapacity(
+            rt.gpa,
+            config.max_header_fields_count,
+        );
     }
     defer prepare_new_request(
         rt.gpa,
@@ -186,7 +207,7 @@ pub fn mainLoop(
     var keepalive_count: u16 = 0;
     var state: State = .{ .request = .header };
 
-    http_loop: while (true) switch (state) {
+    http_loop: switch (state) {
         .request => |*kind| switch (kind.*) {
             .header => {
                 const recv_count = secure.recv(
@@ -194,13 +215,13 @@ pub fn mainLoop(
                     provision.recv_slice,
                 ) catch |e|
                     switch (e) {
-                        error.Closed => break,
+                        error.Closed => break :http_loop,
                         else => |err| {
                             log.debug(
-                                "recv failed on socket | {t}",
+                                "request=>header recv failed on socket | {t}",
                                 .{err},
                             );
-                            break;
+                            break :http_loop;
                         },
                     };
 
@@ -210,10 +231,11 @@ pub fn mainLoop(
                     config.socket_buffer_size.Usize(),
                 );
                 if (provision.zc_recv_buffer.len > config.max_request_size.Usize())
-                    break;
+                    break :http_loop;
 
+                const end_marker = "\r\n\r\n";
                 const search_area_start =
-                    (provision.zc_recv_buffer.len - recv_count) -| 4;
+                    (provision.zc_recv_buffer.len - recv_count) -| end_marker.len;
 
                 if (mem.find(
                     u8,
@@ -221,9 +243,9 @@ pub fn mainLoop(
                     provision.zc_recv_buffer.subslice(.{
                         .start = search_area_start,
                     }),
-                    "\r\n\r\n",
+                    end_marker,
                 )) |header_end| {
-                    const real_header_end = header_end + 4;
+                    const real_header_end = header_end + end_marker.len;
                     try provision.request.parse(
                         rt.gpa,
                         // Add 4 to account for the actual header end sequence.
@@ -274,7 +296,7 @@ pub fn mainLoop(
                         },
                     );
                     state = .handler;
-                    continue;
+                    continue :http_loop state;
                 }
 
                 const recv_count = secure.recv(
@@ -282,13 +304,13 @@ pub fn mainLoop(
                     provision.recv_slice,
                 ) catch |e|
                     switch (e) {
-                        error.Closed => break,
+                        error.Closed => break :http_loop,
                         else => |err| {
                             log.debug(
                                 "recv failed on socket | {t}",
                                 .{err},
                             );
-                            break;
+                            break :http_loop;
                         },
                     };
 
@@ -298,7 +320,7 @@ pub fn mainLoop(
                     config.socket_buffer_size.Usize(),
                 );
                 if (provision.zc_recv_buffer.len > config.max_request_size.Usize())
-                    break;
+                    break :http_loop;
 
                 info.current_length += recv_count;
                 debug.assert(info.current_length <= info.content_length);
@@ -323,7 +345,7 @@ pub fn mainLoop(
                 provision.response.body = null;
 
                 state = .respond;
-                continue;
+                continue :http_loop state;
             };
 
             const ctx: http.Context = .{
@@ -344,7 +366,7 @@ pub fn mainLoop(
                 .handler = h_with_data,
             };
 
-            const next_respond: http.Respond = next.run() catch |err| blk: {
+            const next_respond: http.Respond = next.run() catch |err| respond: {
                 log.warn("rt{d} - \"{t} {s}\" {t} ({s})", .{
                     rt.id,
                     provision.request.method.?,
@@ -360,7 +382,7 @@ pub fn mainLoop(
                 else
                     "";
 
-                break :blk try provision.response.apply(.{
+                break :respond try provision.response.apply(.{
                     .status = .@"Internal Server Error",
                     .mime = .TEXT,
                     .body = body,
@@ -429,7 +451,7 @@ pub fn mainLoop(
                     send_slice,
                 ) catch |err| {
                     log.debug("send failed on socket | {t}", .{err});
-                    break;
+                    break :http_loop;
                 };
                 if (sent_length != send_slice.len) break :http_loop;
                 sent += sent_length;
@@ -438,14 +460,14 @@ pub fn mainLoop(
             const connection = provision.request.headers.get(
                 "Connection",
             ) orelse "keep-alive";
-            if (mem.eql(u8, connection, "close")) break;
+            if (mem.eql(u8, connection, "close")) break :http_loop;
             if (config.max_keepalive_count) |max| {
                 if (keepalive_count > max) {
                     log.debug(
                         "closing connection, exceeded keepalive max",
                         .{},
                     );
-                    break;
+                    break :http_loop;
                 }
 
                 keepalive_count += 1;
@@ -458,7 +480,7 @@ pub fn mainLoop(
                 config,
             );
         },
-    };
+    }
 
     log.info("connection ({s}) closed", .{secure_info.address});
 
@@ -484,7 +506,7 @@ fn prepare_new_request(
     gpa: mem.Allocator,
     state: ?*State,
     provision: *Provision,
-    config: Config,
+    config: zzz.Config,
 ) !void {
     debug.assert(provision.initalized);
     provision.request.clear(gpa);
@@ -502,84 +524,6 @@ fn prepare_new_request(
 
     if (state) |s| s.* = .{ .request = .header };
 }
-
-/// These are various general configuration
-/// options that are important for the actual framework.
-///
-/// This includes various different options and limits
-/// for interacting with the underlying network.
-pub const Config = struct {
-    /// Stack Size
-    ///
-    /// If you have a large number of middlewares or
-    /// create a LOT of stack memory, you may want to increase this.
-    ///
-    /// P.S: A lot of functions in the standard library do end up allocating
-    /// a lot on the stack (such as std.log).
-    ///
-    /// Default: 1MB
-    stack_size: Coroutine.Stack = .@"1MiB",
-    /// Use a Max Header Size of 8KiB same as Nginx, Tomcat and Httpd but
-    /// consider making this configurable
-    /// https://stackoverflow.com/questions/686217/maximum-on-http-header-values
-    /// Default: 8KiB
-    max_http_header_size: zcore.Size = .@"8KiB",
-    /// Maximum size (in bytes) of the Request.
-    ///
-    /// Default: 2MiB
-    max_request_size: zcore.Size = .@"2MiB",
-    /// Maximum size (in bytes) of the Request URI.
-    ///
-    /// Default: 2KiB
-    max_request_uri_size: zcore.Size = .@"2KiB",
-    /// Number of Maximum Concurrent Connections.
-    ///
-    /// This is applied PER runtime.
-    /// zzz will drop/close any connections greater
-    /// than this.
-    ///
-    /// You can set this to `null` to have no maximum.
-    ///
-    /// Default: `null`
-    max_connection_count: ?u32 = null,
-    /// Maximum number of Captures in a Route
-    ///
-    /// Default: 8
-    max_capture_count: u16 = 8,
-    /// Number of times a Request-Response can happen with keep-alive.
-    ///
-    /// Setting this to `null` will set no limit.
-    ///
-    /// Default: `null`
-    max_keepalive_count: ?u16 = null,
-    /// Amount of allocated memory retained
-    /// after an arena is cleared.
-    ///
-    /// A higher value will increase memory usage but
-    /// should make allocators faster.
-    ///
-    /// A lower value will reduce memory usage but
-    /// will make allocators slower.
-    ///
-    /// Default: 1MiB
-    retained_arena_bytes: zcore.Size = .@"1MiB",
-    /// Amount of space on the `recv_buffer` retained
-    /// after every send.
-    ///
-    /// Default: 1MiB
-    retained_recv_bytes: zcore.Size = .@"1MiB",
-    /// Maximum size (in bytes) of the Recv buffer.
-    /// This is mainly a concern when you are reading in
-    /// large requests before responding.
-    ///
-    /// Default: 2MiB
-    max_recv_buffer_size: zcore.Size = .@"2MiB",
-    /// Size of the buffer (in bytes) used for
-    /// interacting with the socket.
-    ///
-    /// Default: 1 MiB
-    socket_buffer_size: zcore.Size = .@"1MiB",
-};
 
 const Request = union(enum) {
     header,
@@ -603,7 +547,7 @@ pub const Provision = struct {
     recv_slice: []u8,
     zc_recv_buffer: ZeroCopy(u8),
     header_writer: Io.Writer,
-    arena: std.heap.ArenaAllocator,
+    arena: heap.ArenaAllocator,
     storage: zcore.Storage,
     captures: []Trie.Capture,
     queries: http.Queries,
@@ -615,11 +559,10 @@ const log = std.log.scoped(.@"zzz/http/Server");
 
 const std = @import("std");
 const mem = std.mem;
-const ArenaAllocator = std.heap.ArenaAllocator;
+const heap = std.heap;
 const debug = std.debug;
 const Io = std.Io;
 const builtin = @import("builtin");
-const tag = builtin.os.tag;
 
 const zzz = @import("zzz");
 const zcore = zzz.core;
@@ -627,14 +570,13 @@ const tardy = zzz.tardy;
 const Coroutine = tardy.Coroutine;
 const tcore = tardy.core;
 const ZeroCopy = tcore.ZeroCopy;
-const cross = tardy.cross;
 const pool = tcore.pool;
 const Runtime = tardy.Runtime;
 const Secsock = zzz.Secsock;
 const Socket = tardy.net.Socket;
 const Task = Runtime.Task;
 const http = zzz.http;
-const Router = @import("Router.zig");
+const Router = http.Router;
 const Route = Router.Route;
 const Middleware = Router.Middleware;
 const Trie = Router.Trie;

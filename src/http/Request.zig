@@ -29,14 +29,14 @@ pub fn clear(request: *Request, gpa: mem.Allocator) void {
 pub fn parse(
     request: *Request,
     gpa: mem.Allocator,
-    header: []const u8,
+    headers: []const u8,
     options: Options,
 ) (OoM || http.Error)!void {
     request.headers.clearRetainingCapacity();
 
     var lines = mem.tokenizeAny(
         u8,
-        header,
+        headers,
         "\r\n",
     );
 
@@ -62,7 +62,8 @@ pub fn parse(
     if (uri.len >= options.max_uri_bytes.Usize())
         return error.URITooLong;
 
-    if (uri[0] != '/') return error.MalformedRequest;
+    if (uri[0] != '/' and mem.find(u8, uri[0..4], "http") == null)
+        return error.MalformedRequest;
     request.uri = uri;
 
     const version_string = chunks.next() orelse
@@ -78,19 +79,22 @@ pub fn parse(
     if (chunks.next() != null) return error.MalformedRequest;
 
     var total_size: usize = 0;
-    while (lines.next()) |line| : ({
-        total_size += line.len;
+    while (lines.next()) |header| : ({
+        total_size += header.len;
     }) {
         if (total_size > options.max_request_bytes.Usize())
             return error.ContentTooLarge;
 
+        // https://datatracker.ietf.org/doc/html/rfc9112#name-field-line-parsing
         var header_iter = mem.tokenizeScalar(
             u8,
-            line,
+            header,
             ':',
         );
         const key = header_iter.next() orelse
             return error.MalformedRequest;
+
+        if (key[key.len - 1] == ' ') return error.MalformedRequest;
 
         const value = mem.trimStart(
             u8,
@@ -100,7 +104,12 @@ pub fn parse(
 
         if (value.len == 0) return error.MalformedRequest;
 
-        try request.headers.put(gpa, key, value);
+        // FIXME(bernardassan): when a key is repeated with values
+        // https://datatracker.ietf.org/doc/html/rfc9110#name-field-lines-and-combined-fi
+        request.headers.putAssumeCapacityNoClobber(
+            key,
+            value,
+        );
     }
 
     if (request.headers.get("Cookie")) |cookies|

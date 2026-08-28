@@ -1,5 +1,6 @@
 pub const Response = @This();
 
+// TODO: add HTTP Version
 status: ?Status = null,
 mime: ?Mime = null,
 body: ?[]const u8 = null,
@@ -63,12 +64,13 @@ pub fn writeHeaders(
     );
 
     // Content-Type
-    const mime = response.mime.?;
-    const content_type = switch (mime.content_type) {
-        .single => |single| single,
-        .multiple => |content_types| content_types[0],
-    };
-    try writer.print("Content-Type: {s}\r\n", .{content_type});
+    if (response.mime) |mime| {
+        const content_type = switch (mime.content_type) {
+            .single => |single| single,
+            .multiple => |content_types| content_types[0],
+        };
+        try writer.print("Content-Type: {s}\r\n", .{content_type});
+    }
 
     // Content-Length
     if (content_length) |length|

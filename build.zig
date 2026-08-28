@@ -30,6 +30,7 @@ pub fn build(b: *Build) void {
         "middleware",
         "sse",
         "tls",
+        "websocket",
     }) |name| add_example(b, .{
         .name = name,
         .target = target,
