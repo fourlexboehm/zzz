@@ -237,56 +237,61 @@ pub fn mainLoop(
                 const search_area_start =
                     (provision.zc_recv_buffer.len - recv_count) -| end_marker.len;
 
-                if (mem.find(
+                const header_end = mem.find(
                     u8,
                     // Minimize the search area.
                     provision.zc_recv_buffer.subslice(.{
                         .start = search_area_start,
                     }),
                     end_marker,
-                )) |header_end| {
-                    const real_header_end = header_end + end_marker.len;
-                    try provision.request.parse(
-                        rt.gpa,
-                        // Add 4 to account for the actual header end sequence.
-                        provision.zc_recv_buffer.subslice(
-                            .{ .end = real_header_end },
-                        ),
-                        .{
-                            .max_request_bytes = config.max_request_size,
-                            .max_uri_bytes = config.max_request_uri_size,
-                        },
-                    );
+                ) orelse return error.BadHeader;
 
-                    log.info("rt{d} - \"{t} {s}\" {s} ({s})", .{
-                        rt.id,
-                        provision.request.method.?,
-                        provision.request.uri.?,
-                        provision.request.headers.get("User-Agent") orelse "N/A",
-                        secure_info.address,
-                    });
+                std.debug.print("Raw\n{s}\n", .{
+                    provision.zc_recv_buffer.subslice(.{
+                        .start = search_area_start,
+                    }),
+                });
+                const real_header_end = header_end + end_marker.len;
 
-                    const content_length_str = provision.request.headers.get(
-                        "Content-Length",
-                    ) orelse "0";
-                    const content_length = try std.fmt.parseUnsigned(
-                        usize,
-                        content_length_str,
-                        10,
-                    );
-                    log.debug("content length={d}", .{content_length});
+                try provision.request.parse(
+                    rt.gpa,
+                    provision.zc_recv_buffer.subslice(
+                        .{ .end = real_header_end },
+                    ),
+                    .{
+                        .max_request_bytes = config.max_request_size,
+                        .max_uri_bytes = config.max_request_uri_size,
+                    },
+                );
 
-                    if (provision.request.expect_body() and content_length != 0) {
-                        state = .{
-                            .request = .{
-                                .body = .{
-                                    .current_length = provision.zc_recv_buffer.len - real_header_end,
-                                    .content_length = content_length,
-                                },
+                log.info("rt{d} - \"{t} {s}\" {s} ({s})", .{
+                    rt.id,
+                    provision.request.method.?,
+                    provision.request.uri.?,
+                    provision.request.headers.get("User-Agent") orelse "N/A",
+                    secure_info.address,
+                });
+
+                const content_length_str = provision.request.headers.get(
+                    "Content-Length",
+                ) orelse "0";
+                const content_length = try std.fmt.parseUnsigned(
+                    usize,
+                    content_length_str,
+                    10,
+                );
+                log.debug("content length={d}", .{content_length});
+
+                if (provision.request.expect_body() and content_length != 0) {
+                    state = .{
+                        .request = .{
+                            .body = .{
+                                .current_length = provision.zc_recv_buffer.len - real_header_end,
+                                .content_length = content_length,
                             },
-                        };
-                    } else state = .handler;
-                }
+                        },
+                    };
+                } else state = .handler;
             },
             .body => |*info| {
                 if (info.current_length == info.content_length) {
