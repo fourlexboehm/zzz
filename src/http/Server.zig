@@ -192,9 +192,8 @@ pub fn mainLoop(
             config.max_header_fields_count,
         );
     }
-    defer prepare_new_request(
+    defer clearProvision(
         rt.gpa,
-        null,
         provision,
         config,
     ) catch unreachable;
@@ -246,11 +245,6 @@ pub fn mainLoop(
                     end_marker,
                 ) orelse return error.BadHeader;
 
-                std.debug.print("Raw\n{s}\n", .{
-                    provision.zc_recv_buffer.subslice(.{
-                        .start = search_area_start,
-                    }),
-                });
                 const real_header_end = header_end + end_marker.len;
 
                 try provision.request.parse(
@@ -274,7 +268,10 @@ pub fn mainLoop(
 
                 const content_length_str = provision.request.headers.get(
                     "Content-Length",
-                ) orelse "0";
+                ) orelse {
+                    state = .handler;
+                    continue :http_loop state;
+                };
                 const content_length = try std.fmt.parseUnsigned(
                     usize,
                     content_length_str,
@@ -282,16 +279,15 @@ pub fn mainLoop(
                 );
                 log.debug("content length={d}", .{content_length});
 
-                if (provision.request.expect_body() and content_length != 0) {
-                    state = .{
-                        .request = .{
-                            .body = .{
-                                .current_length = provision.zc_recv_buffer.len - real_header_end,
-                                .content_length = content_length,
-                            },
+                if (provision.request.expect_body() and content_length != 0) state = .{
+                    .request = .{
+                        .body = .{
+                            .current_length = provision.zc_recv_buffer.len - real_header_end,
+                            .content_length = content_length,
                         },
-                    };
+                    },
                 } else state = .handler;
+                continue :http_loop state;
             },
             .body => |*info| {
                 if (info.current_length == info.content_length) {
@@ -300,6 +296,7 @@ pub fn mainLoop(
                             .start = provision.zc_recv_buffer.len - info.content_length,
                         },
                     );
+
                     state = .handler;
                     continue :http_loop state;
                 }
@@ -307,17 +304,13 @@ pub fn mainLoop(
                 const recv_count = secure.recv(
                     rt,
                     provision.recv_slice,
-                ) catch |e|
-                    switch (e) {
-                        error.Closed => break :http_loop,
-                        else => |err| {
-                            log.debug(
-                                "recv failed on socket | {t}",
-                                .{err},
-                            );
-                            break :http_loop;
-                        },
-                    };
+                ) catch |e| switch (e) {
+                    error.Closed => break :http_loop,
+                    else => |err| {
+                        log.debug("recv failed on socket | {t}", .{err});
+                        break :http_loop;
+                    },
+                };
 
                 provision.zc_recv_buffer.mark_written(recv_count);
                 provision.recv_slice = try provision.zc_recv_buffer.get_write_area(
@@ -329,6 +322,9 @@ pub fn mainLoop(
 
                 info.current_length += recv_count;
                 debug.assert(info.current_length <= info.content_length);
+
+                state = .handler;
+                continue :http_loop state;
             },
         },
         .handler => {
@@ -396,9 +392,8 @@ pub fn mainLoop(
 
             switch (next_respond) {
                 .standard => {
-                    // applies the respond onto the response
-                    // try provision.response.apply(respond);
                     state = .respond;
+                    continue :http_loop state;
                 },
                 .responded => {
                     const connection = provision.request.headers.get(
@@ -417,34 +412,31 @@ pub fn mainLoop(
                         keepalive_count += 1;
                     }
 
-                    try prepare_new_request(
-                        rt.gpa,
-                        &state,
-                        provision,
-                        config,
-                    );
+                    state = .next_request;
+                    continue :http_loop state;
                 },
                 .close => break :http_loop,
             }
         },
         .respond => {
-            // TODO: lets use optional properly
-            const body = provision.response.body orelse "";
-            const content_length = body.len;
-
             try provision.response.writeHeaders(
                 &provision.header_writer,
-                content_length,
+                if (provision.response.body) |body|
+                    body.len
+                else
+                    null,
             );
             const headers = provision.header_writer.buffered();
 
-            var sent: usize = 0;
+            // TODO: lets use optional properly
+            const body = provision.response.body orelse "";
             const pseudo: zcore.Pseudoslice = .init(
                 headers,
                 body,
                 provision.recv_slice,
             );
 
+            var sent: usize = 0;
             while (sent < pseudo.len) {
                 const send_slice = pseudo.get(
                     sent,
@@ -458,8 +450,9 @@ pub fn mainLoop(
                     log.debug("send failed on socket | {t}", .{err});
                     break :http_loop;
                 };
+                defer sent += sent_length;
+
                 if (sent_length != send_slice.len) break :http_loop;
-                sent += sent_length;
             }
 
             const connection = provision.request.headers.get(
@@ -478,12 +471,14 @@ pub fn mainLoop(
                 keepalive_count += 1;
             }
 
-            try prepare_new_request(
-                rt.gpa,
-                &state,
-                provision,
-                config,
-            );
+            state = .next_request;
+            continue :http_loop state;
+        },
+        .next_request => {
+            try clearProvision(rt.gpa, provision, config);
+
+            state = .{ .request = .header };
+            continue :http_loop state;
         },
     }
 
@@ -507,12 +502,7 @@ pub fn mainLoop(
     }
 }
 
-fn prepare_new_request(
-    gpa: mem.Allocator,
-    state: ?*State,
-    provision: *Provision,
-    config: zzz.Config,
-) !void {
+fn clearProvision(gpa: mem.Allocator, provision: *Provision, config: zzz.Config) !void {
     debug.assert(provision.initalized);
     provision.request.clear(gpa);
     provision.response.clear();
@@ -526,8 +516,6 @@ fn prepare_new_request(
         gpa,
         config.socket_buffer_size.Usize(),
     );
-
-    if (state) |s| s.* = .{ .request = .header };
 }
 
 const Request = union(enum) {
@@ -544,6 +532,7 @@ const State = union(enum) {
     request: Request,
     handler,
     respond,
+    next_request,
 };
 
 pub const Provision = struct {
