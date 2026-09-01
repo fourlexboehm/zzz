@@ -216,8 +216,8 @@ pub fn mainLoop(
                     switch (e) {
                         error.Closed => break :http_loop,
                         else => |err| {
-                            log.debug(
-                                "request=>header recv failed on socket | {t}",
+                            log.err(
+                                "request=>header: recv failed on socket | {t}",
                                 .{err},
                             );
                             break :http_loop;
@@ -307,7 +307,7 @@ pub fn mainLoop(
                 ) catch |e| switch (e) {
                     error.Closed => break :http_loop,
                     else => |err| {
-                        log.debug("recv failed on socket | {t}", .{err});
+                        log.err("request=>body: recv failed on socket | {t}", .{err});
                         break :http_loop;
                     },
                 };
@@ -368,7 +368,7 @@ pub fn mainLoop(
             };
 
             const next_respond: http.Respond = next.run() catch |err| respond: {
-                log.warn("rt{d} - \"{t} {s}\" {t} ({s})", .{
+                log.err("rt{d} - \"{t} {s}\" {t} ({s})", .{
                     rt.id,
                     provision.request.method.?,
                     provision.request.uri.?,
@@ -447,7 +447,10 @@ pub fn mainLoop(
                     rt,
                     send_slice,
                 ) catch |err| {
-                    log.debug("send failed on socket | {t}", .{err});
+                    log.err(
+                        "respond: send failed on socket | {t}",
+                        .{err},
+                    );
                     break :http_loop;
                 };
                 defer sent += sent_length;
