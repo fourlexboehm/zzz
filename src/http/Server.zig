@@ -18,25 +18,17 @@ pub fn serve(
     const tls_info = tls.info();
     log.info("security mode: {t}", .{tls_info.name});
 
-    const count = server.config.max_connection_count orelse 1024;
-    const pooling: pool.Kind = if (server.config.max_connection_count == null)
-        .grow
-    else
-        .static;
+    const count: u32, const pooling: pool.Kind =
+        if (server.config.max_connection_count) |count|
+            .{ count, .static }
+        else
+            .{ 1024, .grow };
 
     const provision_pool = try rt.gpa.create(
         pool.Pool(Provision),
     );
     provision_pool.* = try .init(rt.gpa, count, pooling);
     errdefer rt.gpa.destroy(provision_pool);
-
-    const connection_count = try rt.gpa.create(usize);
-    errdefer rt.gpa.destroy(connection_count);
-    connection_count.* = 0;
-
-    const accept_queued = try rt.gpa.create(bool);
-    errdefer rt.gpa.destroy(accept_queued);
-    accept_queued.* = true;
 
     // initialize first batch of provisions :)
     for (provision_pool.items) |*provision| {
@@ -77,6 +69,14 @@ pub fn serve(
         );
     }
 
+    const connection_count = try rt.gpa.create(usize);
+    errdefer rt.gpa.destroy(connection_count);
+    connection_count.* = 0;
+
+    const accept_queued = try rt.gpa.create(bool);
+    errdefer rt.gpa.destroy(accept_queued);
+    accept_queued.* = true;
+
     try rt.spawn(
         mainLoop,
         .{
@@ -102,7 +102,7 @@ pub fn mainLoop(
     accept_queued: *bool,
 ) !void {
     accept_queued.* = false;
-    var secure = tls.accept(rt) catch |e| {
+    var secure = tls.accept(rt) catch |err| {
         if (!accept_queued.*) {
             try rt.spawn(
                 mainLoop,
@@ -119,7 +119,7 @@ pub fn mainLoop(
             );
             accept_queued.* = true;
         }
-        return e;
+        return err;
     };
     defer secure.deinit(rt.gpa);
     const secure_info = secure.info();
@@ -225,32 +225,35 @@ pub fn mainLoop(
                     };
 
                 provision.zc_recv_buffer.mark_written(recv_count);
+                if (provision.zc_recv_buffer.len > config.max_request_size.Usize())
+                    break :http_loop;
+
                 provision.recv_slice = try provision.zc_recv_buffer.get_write_area(
                     rt.gpa,
                     config.socket_buffer_size.Usize(),
                 );
-                if (provision.zc_recv_buffer.len > config.max_request_size.Usize())
-                    break :http_loop;
+
+                const begin = provision.zc_recv_buffer.len - recv_count;
 
                 const end_marker = "\r\n\r\n";
-                const search_area_start =
-                    (provision.zc_recv_buffer.len - recv_count) -| end_marker.len;
+                if (!mem.endsWith(u8, provision.zc_recv_buffer.subslice(.{
+                    .start = begin,
+                }), end_marker)) {
+                    const respond = try provision.response.apply(.{
+                        .status = .@"Bad Request",
+                        .mime = .TEXT,
+                        .body = "Check if using https/http incorrectly in the request.\n",
+                    });
+                    state = .{ .next_respond = respond };
+                    continue :http_loop state;
+                }
 
-                const header_end = mem.find(
-                    u8,
-                    // Minimize the search area.
-                    provision.zc_recv_buffer.subslice(.{
-                        .start = search_area_start,
-                    }),
-                    end_marker,
-                ) orelse return error.BadHeader;
-
-                const real_header_end = header_end + end_marker.len;
+                const end = provision.zc_recv_buffer.len;
 
                 try provision.request.parse(
                     rt.gpa,
                     provision.zc_recv_buffer.subslice(
-                        .{ .end = real_header_end },
+                        .{ .end = end },
                     ),
                     .{
                         .max_request_bytes = config.max_request_size,
@@ -282,7 +285,7 @@ pub fn mainLoop(
                 if (provision.request.expect_body() and content_length != 0) state = .{
                     .request = .{
                         .body = .{
-                            .current_length = provision.zc_recv_buffer.len - real_header_end,
+                            .current_length = provision.zc_recv_buffer.len - end,
                             .content_length = content_length,
                         },
                     },
@@ -313,12 +316,12 @@ pub fn mainLoop(
                 };
 
                 provision.zc_recv_buffer.mark_written(recv_count);
+                if (provision.zc_recv_buffer.len > config.max_request_size.Usize())
+                    break :http_loop;
                 provision.recv_slice = try provision.zc_recv_buffer.get_write_area(
                     rt.gpa,
                     config.socket_buffer_size.Usize(),
                 );
-                if (provision.zc_recv_buffer.len > config.max_request_size.Usize())
-                    break :http_loop;
 
                 info.current_length += recv_count;
                 debug.assert(info.current_length <= info.content_length);
@@ -367,7 +370,7 @@ pub fn mainLoop(
                 .handler = h_with_data,
             };
 
-            const next_respond: http.Respond = next.run() catch |err| respond: {
+            const respond: http.Respond = next.run() catch |err| respond: {
                 log.err("rt{d} - \"{t} {s}\" {t} ({s})", .{
                     rt.id,
                     provision.request.method.?,
@@ -390,6 +393,10 @@ pub fn mainLoop(
                 });
             };
 
+            state = .{ .next_respond = respond };
+            continue :http_loop state;
+        },
+        .next_respond => |next_respond| {
             switch (next_respond) {
                 .standard => {
                     state = .respond;
@@ -458,23 +465,7 @@ pub fn mainLoop(
                 if (sent_length != send_slice.len) break :http_loop;
             }
 
-            const connection = provision.request.headers.get(
-                "Connection",
-            ) orelse "keep-alive";
-            if (mem.eql(u8, connection, "close")) break :http_loop;
-            if (config.max_keepalive_count) |max| {
-                if (keepalive_count > max) {
-                    log.debug(
-                        "closing connection, exceeded keepalive max",
-                        .{},
-                    );
-                    break :http_loop;
-                }
-
-                keepalive_count += 1;
-            }
-
-            state = .next_request;
+            state = .{ .next_respond = .responded };
             continue :http_loop state;
         },
         .next_request => {
@@ -536,6 +527,7 @@ const State = union(enum) {
     handler,
     respond,
     next_request,
+    next_respond: http.Respond,
 };
 
 pub const Provision = struct {
