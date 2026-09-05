@@ -15,10 +15,18 @@ pub const Fields = struct {
     headers: []const [2][]const u8 = &.{},
 };
 
-pub const empty: Response = .{
-    .headers = .empty,
-};
+pub fn init(gpa: mem.Allocator, header_fields_count_max: u32) OoM!Response {
+    var new: Response = .{
+        .headers = .empty,
+    };
+    try new.headers.ensureTotalCapacity(
+        gpa,
+        header_fields_count_max,
+    );
+    return new;
+}
 
+// `headers` uses `ctx.arena` so no need to manually free values
 pub fn deinit(response: *Response, gpa: mem.Allocator) void {
     response.headers.deinit(gpa);
 }
@@ -81,6 +89,7 @@ pub fn writeHeaders(
 
 const std = @import("std");
 const mem = std.mem;
+const OoM = mem.Allocator.Error;
 const Io = std.Io;
 
 const zzz = @import("zzz");

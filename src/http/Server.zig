@@ -6,7 +6,34 @@ pub fn init(config: zzz.Config) Server {
     return .{ .config = config };
 }
 
-pub fn deinit(_: *const Server) void {}
+fn deinit(gpa: mem.Allocator, provisions: *pool.Pool(Provision)) void {
+    for (provisions.items) |*provision| {
+        provision.initalized = false;
+
+        {
+            var itr = provision.queries.iterator();
+            defer provision.queries.deinit(gpa);
+            while (itr.next()) |query| {
+                gpa.free(query.key_ptr.*);
+                gpa.free(query.value_ptr.*);
+            }
+        }
+
+        provision.storage.deinit(gpa);
+        provision.request.deinit(gpa);
+        provision.response.deinit(gpa);
+
+        provision.zc_recv_buffer.deinit(gpa);
+
+        gpa.free(provision.header_writer.buffer);
+
+        gpa.free(provision.captures);
+
+        provision.arena.deinit();
+    }
+    provisions.deinit(gpa);
+    gpa.destroy(provisions);
+}
 
 /// Serve an HTTP server.
 pub fn serve(
@@ -18,56 +45,23 @@ pub fn serve(
     const tls_info = tls.info();
     log.info("security mode: {t}", .{tls_info.name});
 
-    const count: u32, const pooling: pool.Kind =
-        if (server.config.max_connection_count) |count|
-            .{ count, .static }
-        else
-            .{ 1024, .grow };
-
-    const provision_pool = try rt.gpa.create(
+    const provisions = try rt.gpa.create(
         pool.Pool(Provision),
     );
-    provision_pool.* = try .init(rt.gpa, count, pooling);
-    errdefer rt.gpa.destroy(provision_pool);
+    errdefer rt.gpa.destroy(provisions);
+
+    const count: u32, const pooling: pool.Kind =
+        if (server.config.connection_count_max) |count|
+            .{ count, .static }
+        else
+            .{ 256, .grow };
+
+    provisions.* = try .init(rt.gpa, count, pooling);
+    errdefer provisions.deinit(rt.gpa);
 
     // initialize first batch of provisions :)
-    for (provision_pool.items) |*provision| {
-        provision.initalized = true;
-        provision.queries = .empty;
-        provision.storage = .empty;
-        provision.request = .empty;
-        provision.response = .empty;
-
-        provision.zc_recv_buffer = try .init(
-            rt.gpa,
-            server.config.socket_buffer_size.Usize(),
-        );
-        errdefer provision.zc_recv_buffer.deinit(rt.gpa);
-
-        const header_buf = try rt.gpa.alloc(
-            u8,
-            server.config.max_http_header_size.Usize(),
-        );
-        errdefer rt.gpa.free(header_buf);
-        provision.header_writer = .fixed(header_buf);
-
-        provision.captures = try rt.gpa.alloc(
-            Trie.Capture,
-            server.config.max_capture_count,
-        );
-        errdefer rt.gpa.free(provision.captures);
-
-        provision.arena = .init(rt.gpa);
-
-        try provision.request.headers.ensureTotalCapacity(
-            rt.gpa,
-            server.config.max_header_fields_count,
-        );
-        try provision.response.headers.ensureTotalCapacity(
-            rt.gpa,
-            server.config.max_header_fields_count,
-        );
-    }
+    for (provisions.items) |*provision|
+        try initProvision(rt.gpa, provision, server.config);
 
     const connection_count = try rt.gpa.create(usize);
     errdefer rt.gpa.destroy(connection_count);
@@ -84,7 +78,7 @@ pub fn serve(
             server.config,
             router,
             tls,
-            provision_pool,
+            provisions,
             connection_count,
             accept_queued,
         },
@@ -127,7 +121,7 @@ pub fn mainLoop(
     connection_count.* += 1;
     defer connection_count.* -= 1;
 
-    if (config.max_connection_count) |max| if (connection_count.* > max) {
+    if (config.connection_count_max) |max| if (connection_count.* > max) {
         return log.debug("over connection max, closing", .{});
     };
 
@@ -155,53 +149,9 @@ pub fn mainLoop(
     // otherwise, it should be initalized.
     if (!provision.initalized) {
         log.debug("initalizing new provision", .{});
-
-        provision.initalized = true;
-        provision.queries = .empty;
-        provision.storage = .empty;
-        provision.request = .empty;
-        provision.response = .empty;
-
-        provision.zc_recv_buffer = try .init(
-            rt.gpa,
-            config.socket_buffer_size.Usize(),
-        );
-        errdefer provision.zc_recv_buffer.deinit(rt.gpa);
-
-        const header_buf = try rt.gpa.alloc(
-            u8,
-            config.max_http_header_size.Usize(),
-        );
-        errdefer rt.gpa.free(header_buf);
-        provision.header_writer = .fixed(header_buf);
-
-        provision.captures = try rt.gpa.alloc(
-            Trie.Capture,
-            config.max_capture_count,
-        );
-        errdefer rt.gpa.free(provision.captures);
-
-        provision.arena = .init(rt.gpa);
-
-        try provision.request.headers.ensureTotalCapacity(
-            rt.gpa,
-            config.max_header_fields_count,
-        );
-        try provision.response.headers.ensureTotalCapacity(
-            rt.gpa,
-            config.max_header_fields_count,
-        );
+        try initProvision(rt.gpa, provision, config);
     }
-    defer clearProvision(
-        rt.gpa,
-        provision,
-        config,
-    ) catch unreachable;
-
-    provision.recv_slice = try provision.zc_recv_buffer.get_write_area(
-        rt.gpa,
-        config.socket_buffer_size.Usize(),
-    );
+    defer clearProvision(rt.gpa, provision, config);
 
     var keepalive_count: u16 = 0;
     var state: State = .{ .request = .header };
@@ -209,9 +159,13 @@ pub fn mainLoop(
     http_loop: switch (state) {
         .request => |*kind| switch (kind.*) {
             .header => {
+                const recv_slice = try provision.zc_recv_buffer.get_write_area(
+                    rt.gpa,
+                    config.recv_buffer_size.Usize(),
+                );
                 const recv_count = secure.recv(
                     rt,
-                    provision.recv_slice,
+                    recv_slice,
                 ) catch |e|
                     switch (e) {
                         error.Closed => break :http_loop,
@@ -225,13 +179,8 @@ pub fn mainLoop(
                     };
 
                 provision.zc_recv_buffer.mark_written(recv_count);
-                if (provision.zc_recv_buffer.len > config.max_request_size.Usize())
+                if (provision.zc_recv_buffer.len > config.request_size_max.Usize())
                     break :http_loop;
-
-                provision.recv_slice = try provision.zc_recv_buffer.get_write_area(
-                    rt.gpa,
-                    config.socket_buffer_size.Usize(),
-                );
 
                 const begin = provision.zc_recv_buffer.len - recv_count;
 
@@ -256,8 +205,8 @@ pub fn mainLoop(
                         .{ .end = end },
                     ),
                     .{
-                        .max_request_bytes = config.max_request_size,
-                        .max_uri_bytes = config.max_request_uri_size,
+                        .request_bytes_max = config.request_size_max,
+                        .request_uri_bytes_max = config.request_uri_size_max,
                     },
                 );
 
@@ -304,9 +253,14 @@ pub fn mainLoop(
                     continue :http_loop state;
                 }
 
+                const recv_slice = try provision.zc_recv_buffer.get_write_area(
+                    rt.gpa,
+                    config.recv_buffer_size.Usize(),
+                );
+
                 const recv_count = secure.recv(
                     rt,
-                    provision.recv_slice,
+                    recv_slice,
                 ) catch |e| switch (e) {
                     error.Closed => break :http_loop,
                     else => |err| {
@@ -316,12 +270,8 @@ pub fn mainLoop(
                 };
 
                 provision.zc_recv_buffer.mark_written(recv_count);
-                if (provision.zc_recv_buffer.len > config.max_request_size.Usize())
+                if (provision.zc_recv_buffer.len > config.request_size_max.Usize())
                     break :http_loop;
-                provision.recv_slice = try provision.zc_recv_buffer.get_write_area(
-                    rt.gpa,
-                    config.socket_buffer_size.Usize(),
-                );
 
                 info.current_length += recv_count;
                 debug.assert(info.current_length <= info.content_length);
@@ -407,7 +357,7 @@ pub fn mainLoop(
                         "Connection",
                     ) orelse "keep-alive";
                     if (mem.eql(u8, connection, "close")) break :http_loop;
-                    if (config.max_keepalive_count) |max| {
+                    if (config.keepalive_count_max) |max| {
                         if (keepalive_count > max) {
                             log.debug(
                                 "closing connection, exceeded keepalive max",
@@ -437,17 +387,22 @@ pub fn mainLoop(
 
             // TODO: lets use optional properly
             const body = provision.response.body orelse "";
+
+            const recv_slice = try provision.zc_recv_buffer.get_write_area(
+                rt.gpa,
+                config.recv_buffer_size.Usize(),
+            );
             const pseudo: zcore.Pseudoslice = .init(
                 headers,
                 body,
-                provision.recv_slice,
+                recv_slice,
             );
 
             var sent: usize = 0;
             while (sent < pseudo.len) {
                 const send_slice = pseudo.get(
                     sent,
-                    sent + provision.recv_slice.len,
+                    sent + recv_slice.len,
                 );
 
                 const sent_length = secure.send_all(
@@ -469,7 +424,7 @@ pub fn mainLoop(
             continue :http_loop state;
         },
         .next_request => {
-            try clearProvision(rt.gpa, provision, config);
+            clearProvision(rt.gpa, provision, config);
 
             state = .{ .request = .header };
             continue :http_loop state;
@@ -496,20 +451,61 @@ pub fn mainLoop(
     }
 }
 
-fn clearProvision(gpa: mem.Allocator, provision: *Provision, config: zzz.Config) !void {
+fn initProvision(
+    gpa: mem.Allocator,
+    provision: *Provision,
+    config: zzz.Config,
+) !void {
+    provision.initalized = true;
+
+    provision.queries = .empty;
+    provision.storage = .empty;
+
+    provision.request = try .init(
+        gpa,
+        config.header_fields_count_max,
+    );
+    errdefer provision.request.deinit(gpa);
+
+    provision.response = try .init(
+        gpa,
+        config.header_fields_count_max,
+    );
+    errdefer provision.response.deinit(gpa);
+
+    provision.zc_recv_buffer = try .init(
+        gpa,
+        config.recv_zerocopy_size.Usize(),
+    );
+    errdefer provision.zc_recv_buffer.deinit(gpa);
+
+    const header_buf = try gpa.alloc(
+        u8,
+        config.header_size_max.Usize(),
+    );
+    errdefer gpa.free(header_buf);
+    provision.header_writer = .fixed(header_buf);
+
+    provision.captures = try gpa.alloc(
+        Trie.Capture,
+        config.capture_count_max,
+    );
+    errdefer gpa.free(provision.captures);
+
+    provision.arena = .init(gpa);
+}
+
+fn clearProvision(gpa: mem.Allocator, provision: *Provision, config: zzz.Config) void {
     debug.assert(provision.initalized);
     provision.request.clear(gpa);
     provision.response.clear();
     provision.storage.clear(gpa);
     provision.zc_recv_buffer.clear_retaining_capacity();
     _ = provision.header_writer.consumeAll();
-    _ = provision.arena.reset(.{
-        .retain_with_limit = config.retained_arena_bytes.Usize(),
-    });
-    provision.recv_slice = try provision.zc_recv_buffer.get_write_area(
-        gpa,
-        config.socket_buffer_size.Usize(),
-    );
+    _ = provision.arena.reset(if (config.arena_bytes_retained) |bytes_retained|
+        .{ .retain_with_limit = bytes_retained.Usize() }
+    else
+        .{ .retain_capacity = {} });
 }
 
 const Request = union(enum) {
@@ -533,7 +529,6 @@ const State = union(enum) {
 pub const Provision = struct {
     // TODO: store this bool out of band
     initalized: bool = false,
-    recv_slice: []u8,
     zc_recv_buffer: ZeroCopy(u8),
     header_writer: Io.Writer,
     arena: heap.ArenaAllocator,

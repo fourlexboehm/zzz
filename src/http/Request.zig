@@ -7,14 +7,27 @@ headers: http.Headers,
 cookies: Cookie.Map,
 body: ?[]const u8 = null,
 
-/// This is for constructing a Request.
-pub const empty: Request = .{
-    .headers = .empty,
-    .cookies = .empty,
-};
+/// Construct a new Request.
+pub fn init(gpa: mem.Allocator, header_fields_count_max: u32) OoM!Request {
+    var new: Request = .{
+        .headers = .empty,
+        .cookies = .empty,
+    };
+    try new.headers.ensureTotalCapacity(
+        gpa,
+        header_fields_count_max,
+    );
+    return new;
+}
 
 pub fn deinit(request: *Request, gpa: mem.Allocator) void {
     request.cookies.deinit(gpa);
+
+    var itr = request.headers.iterator();
+    while (itr.next()) |header| {
+        gpa.free(header.key_ptr.*);
+        gpa.free(header.value_ptr.*);
+    }
     request.headers.deinit(gpa);
 }
 
@@ -59,7 +72,7 @@ pub fn parse(
     const uri = chunks.next() orelse
         return error.MalformedRequest;
 
-    if (uri.len >= options.max_uri_bytes.Usize())
+    if (uri.len >= options.request_uri_bytes_max.Usize())
         return error.URITooLong;
 
     if (uri[0] != '/' and mem.find(u8, uri[0..4], "http") == null)
@@ -82,7 +95,7 @@ pub fn parse(
     while (lines.next()) |header| : ({
         total_size += header.len;
     }) {
-        if (total_size > options.max_request_bytes.Usize())
+        if (total_size > options.request_bytes_max.Usize())
             return error.ContentTooLarge;
 
         // https://datatracker.ietf.org/doc/html/rfc9112#name-field-line-parsing
@@ -137,8 +150,8 @@ test "Parse Request" {
     defer request.deinit(gpa);
 
     try request.parse(gpa, request_header[0..], .{
-        .max_request_bytes = .KiB(1),
-        .max_uri_bytes = .Bytes(256),
+        .request_bytes_max = .KiB(1),
+        .request_uri_bytes_max = .Bytes(256),
     });
 
     try testing.expectEqual(.GET, request.method);
@@ -180,8 +193,8 @@ test "Expect ContentTooLong Error" {
         gpa,
         request_text[0..],
         .{
-            .max_request_bytes = .Bytes(128),
-            .max_uri_bytes = .Bytes(64),
+            .request_bytes_max = .Bytes(128),
+            .request_uri_bytes_max = .Bytes(64),
         },
     );
     try testing.expectError(
@@ -211,8 +224,8 @@ test "Expect URITooLong Error" {
         gpa,
         request_text[0..],
         .{
-            .max_request_bytes = .@"1MiB",
-            .max_uri_bytes = .@"2KiB",
+            .request_bytes_max = .@"1MiB",
+            .request_uri_bytes_max = .@"2KiB",
         },
     );
     try testing.expectError(error.URITooLong, err);
@@ -238,8 +251,8 @@ test "Expect Malformed when URI missing /" {
         gpa,
         request_text[0..],
         .{
-            .max_request_bytes = .KiB(1),
-            .max_uri_bytes = .Bytes(512),
+            .request_bytes_max = .KiB(1),
+            .request_uri_bytes_max = .Bytes(512),
         },
     );
     try testing.expectError(
@@ -290,8 +303,8 @@ test "Malformed Request" {
         gpa,
         request_text[0..],
         .{
-            .max_request_bytes = .KiB(1),
-            .max_uri_bytes = .Bytes(512),
+            .request_bytes_max = .KiB(1),
+            .request_uri_bytes_max = .Bytes(512),
         },
     );
     try testing.expectError(
@@ -301,8 +314,8 @@ test "Malformed Request" {
 }
 
 const Options = struct {
-    max_request_bytes: core.Size,
-    max_uri_bytes: core.Size,
+    request_bytes_max: core.Size,
+    request_uri_bytes_max: core.Size,
 };
 
 const log = std.log.scoped(.@"zzz/http/request");
