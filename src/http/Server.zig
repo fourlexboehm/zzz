@@ -15,6 +15,16 @@ pub fn serve(
     router: *const Router,
     tls: *const Secsock,
 ) !void {
+    return serveWithStop(server, rt, router, tls, null);
+}
+
+pub fn serveWithStop(
+    server: *const Server,
+    rt: *Runtime,
+    router: *const Router,
+    tls: *const Secsock,
+    stop: ?*const atomic.Value(bool),
+) !void {
     const tls_info = tls.info();
     log.info("security mode: {t}", .{tls_info.name});
 
@@ -77,9 +87,15 @@ pub fn serve(
             provision_pool,
             connection_count,
             accept_queued,
+            stop,
         },
         server.config.stack_size,
     );
+}
+
+fn acceptStopped(stop: ?*const atomic.Value(bool)) bool {
+    const s = stop orelse return false;
+    return s.load(.acquire);
 }
 
 pub fn mainLoop(
@@ -90,10 +106,11 @@ pub fn mainLoop(
     provisions: *pool.Pool(Provision),
     connection_count: *usize,
     accept_queued: *bool,
+    stop: ?*const atomic.Value(bool),
 ) !void {
     accept_queued.* = false;
     var secure = tls.accept(rt) catch |e| {
-        if (!accept_queued.*) {
+        if (!accept_queued.* and !acceptStopped(stop)) {
             try rt.spawn(
                 mainLoop,
                 .{
@@ -104,6 +121,7 @@ pub fn mainLoop(
                     provisions,
                     connection_count,
                     accept_queued,
+                    stop,
                 },
                 config.stack_size,
             );
@@ -122,20 +140,23 @@ pub fn mainLoop(
     };
 
     log.debug("queuing up a new accept request", .{});
-    try rt.spawn(
-        mainLoop,
-        .{
-            rt,
-            config,
-            router,
-            tls,
-            provisions,
-            connection_count,
-            accept_queued,
-        },
-        config.stack_size,
-    );
-    accept_queued.* = true;
+    if (!acceptStopped(stop)) {
+        try rt.spawn(
+            mainLoop,
+            .{
+                rt,
+                config,
+                router,
+                tls,
+                provisions,
+                connection_count,
+                accept_queued,
+                stop,
+            },
+            config.stack_size,
+        );
+        accept_queued.* = true;
+    }
 
     const index = try provisions.borrow(rt.gpa);
     defer provisions.release(index);
@@ -463,7 +484,7 @@ pub fn mainLoop(
 
     log.info("connection ({s}) closed", .{secure_info.address});
 
-    if (!accept_queued.*) {
+    if (!accept_queued.* and !acceptStopped(stop)) {
         try rt.spawn(
             mainLoop,
             .{
@@ -474,6 +495,7 @@ pub fn mainLoop(
                 provisions,
                 connection_count,
                 accept_queued,
+                stop,
             },
             config.stack_size,
         );
@@ -616,6 +638,7 @@ const log = std.log.scoped(.@"zzz/http/Server");
 
 const std = @import("std");
 const mem = std.mem;
+const atomic = std.atomic;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const debug = std.debug;
 const Io = std.Io;
