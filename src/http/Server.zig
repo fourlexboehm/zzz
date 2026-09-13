@@ -531,8 +531,8 @@ fn connectionLoop(
             };
             return;
         }
-        defer runtime_drain.remove(&connection_state);
     }
+    defer if (control.runtime_drain) |runtime_drain| runtime_drain.remove(&connection_state);
 
     // if we are growing, we can handle a newly allocated provision here.
     // otherwise, it should be initalized.
