@@ -5,6 +5,9 @@ mime: ?Mime = null,
 body: ?[]const u8 = null,
 headers: http.Headers,
 close_signal: ?*const atomic.Value(bool) = null,
+/// Whether the serialized response told the peer this connection would close.
+/// Do not re-read the drain signal after sending a keep-alive response.
+connection_close: bool = false,
 
 // TODO: there shouldn't be a need for this, we should be able to use
 // reponse everywhere or update it to the needed use cases
@@ -40,6 +43,7 @@ pub fn clear(response: *Response) void {
     response.status = null;
     response.mime = null;
     response.body = null;
+    response.connection_close = false;
     response.headers.clearRetainingCapacity();
 }
 
@@ -64,6 +68,7 @@ pub fn headers_into_writer_connection(
     content_length: ?usize,
     keep_alive: bool,
 ) !void {
+    response.connection_close = !keep_alive;
     // Status Line
     const status = response.status.?;
     try writer.print(

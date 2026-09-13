@@ -72,3 +72,24 @@ zzz can be configured to utilize minimal memory while remaining performant. The 
 
 ## Contribution
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in zzz by you, shall be licensed as MPL2.0, without any additional terms or conditions.
+
+## Coordinated shutdown
+
+Use one `http.Server.Drain` for the shared listener and pass it to every runtime
+with `serveWithDrain`. Once all runtimes register, `isReady()` becomes true.
+`beginDrain()` cancels outstanding accepts on each runtime before closing the
+listener. An accept that has already completed remains owned by its connection
+handler. Request reads and handlers on accepted connections are not canceled.
+
+Responses serialized after drain begins advertise `Connection: close`; responses
+that already advertised keep-alive are allowed another request. An idle accepted
+connection can therefore hold a drain open indefinitely until the peer requests
+or disconnects. A wait timeout reports incomplete draining; it does not close
+connections. Keep application workers and admission available until HTTP tasks
+have finished, then wait for any retained background business operations.
+
+Use `waitDrained` / `waitDrainedBlocking` to observe failure as well as completion.
+For custom responses, use the Response header writer (which records the advertised
+connection policy), or explicitly return `.close` when the handler owns closure.
+This describes sequential HTTP/1.1 requests; it is not a claim of HTTP pipelining,
+WebSocket migration, crash recovery, or zero failures at arbitrary load.

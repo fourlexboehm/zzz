@@ -26,6 +26,11 @@ pub const Drain = struct {
         return .{ .listener = listener };
     }
 
+    /// Stop accepting new connections. Accepted connections remain alive until
+    /// the peer closes or a response advertises Connection: close. In particular,
+    /// an idle connection may hold the drain open indefinitely: closing it races
+    /// requests already sent by the peer. Use the wait timeout for observation,
+    /// not permission to destroy an undrained server.
     pub fn beginDrain(drain: *Drain) void {
         drain.draining.store(true, .release);
         drain.closeListenerIfReady();
@@ -36,7 +41,7 @@ pub const Drain = struct {
     }
 
     pub fn isDrained(drain: *const Drain) bool {
-        return drain.isDraining() and
+        return !drain.drain_failed.load(.acquire) and drain.isDraining() and
             drain.close_state.load(.acquire) == listener_closed and
             drain.active_tasks.load(.acquire) == 0;
     }
@@ -229,13 +234,6 @@ fn serveInternal(
     }
 
     if (control.drain) |drain| {
-        const runtime_drain = try rt.gpa.create(RuntimeDrain);
-        errdefer rt.gpa.destroy(runtime_drain);
-        runtime_drain.* = .{};
-
-        var drain_control = control;
-        drain_control.runtime_drain = runtime_drain;
-
         drain.registerRuntime(rt.count);
         drain.taskStarted();
         errdefer {
@@ -252,7 +250,7 @@ fn serveInternal(
                 provision_pool,
                 connection_count,
                 accept_queued,
-                drain_control,
+                control,
             },
             server.config.stack_size,
         );
@@ -280,7 +278,6 @@ fn acceptStopped(control: ServeControl) bool {
 const ServeControl = struct {
     stop: ?*const atomic.Value(bool) = null,
     drain: ?*Drain = null,
-    runtime_drain: ?*RuntimeDrain = null,
 
     fn taskStarted(control: ServeControl) void {
         if (control.drain) |drain| drain.taskStarted();
@@ -294,52 +291,6 @@ const ServeControl = struct {
         if (control.drain) |drain| return &drain.draining;
         return control.stop;
     }
-};
-
-const RuntimeDrain = struct {
-    connections: ?*ConnectionState = null,
-    draining: bool = false,
-
-    fn add(
-        runtime_drain: *RuntimeDrain,
-        connection: *ConnectionState,
-    ) bool {
-        if (runtime_drain.draining) return false;
-        connection.next = runtime_drain.connections;
-        if (runtime_drain.connections) |head| head.previous = connection;
-        runtime_drain.connections = connection;
-        return true;
-    }
-
-    fn remove(runtime_drain: *RuntimeDrain, connection: *ConnectionState) void {
-        if (connection.previous) |previous|
-            previous.next = connection.next
-        else
-            runtime_drain.connections = connection.next;
-        if (connection.next) |next| next.previous = connection.previous;
-    }
-
-    fn shutdownIdle(runtime_drain: *RuntimeDrain, rt: *Runtime) !void {
-        var connection = runtime_drain.connections;
-        while (connection) |current| : (connection = current.next) {
-            if (!current.idle) continue;
-            current.idle = false;
-            current.socket.shutdown(rt) catch |err| switch (err) {
-                error.ConnectionAborted,
-                error.ConnectionResetByPeer,
-                error.SocketUnconnected,
-                => {},
-                else => return err,
-            };
-        }
-    }
-};
-
-const ConnectionState = struct {
-    socket: *const Secsock,
-    previous: ?*ConnectionState = null,
-    next: ?*ConnectionState = null,
-    idle: bool = false,
 };
 
 const drain_poll_interval: Io.Duration = .fromMilliseconds(10);
@@ -401,7 +352,6 @@ fn drainRuntime(
 ) !void {
     defer control.taskFinished();
     const drain = control.drain.?;
-    const runtime_drain = control.runtime_drain.?;
 
     if (!drain.isDraining()) {
         spawnMainLoop(
@@ -426,17 +376,11 @@ fn drainRuntime(
             return err;
         };
 
-    runtime_drain.draining = true;
     _ = tls.cancelAccepts(rt) catch |err| {
         drain.markFailed();
         return err;
     };
     drain.runtimeCanceled();
-
-    runtime_drain.shutdownIdle(rt) catch |err| {
-        drain.markFailed();
-        return err;
-    };
 }
 
 pub fn mainLoop(
@@ -519,21 +463,6 @@ fn connectionLoop(
     defer provisions.release(index);
     const provision = provisions.get_ptr(index);
 
-    var connection_state: ConnectionState = .{ .socket = &secure };
-    if (control.runtime_drain) |runtime_drain| {
-        if (!runtime_drain.add(&connection_state)) {
-            secure.shutdown(rt) catch |err| switch (err) {
-                error.ConnectionAborted,
-                error.ConnectionResetByPeer,
-                error.SocketUnconnected,
-                => {},
-                else => return err,
-            };
-            return;
-        }
-    }
-    defer if (control.runtime_drain) |runtime_drain| runtime_drain.remove(&connection_state);
-
     // if we are growing, we can handle a newly allocated provision here.
     // otherwise, it should be initalized.
     if (!provision.initalized) {
@@ -580,14 +509,10 @@ fn connectionLoop(
     );
 
     var keepalive_count: u16 = 0;
-    var reused = false;
 
     http_loop: while (true) switch (state) {
         .request => |*kind| switch (kind.*) {
             .header => {
-                if (reused and acceptStopped(control)) break :http_loop;
-                connection_state.idle =
-                    provision.zc_recv_buffer.len == 0;
                 const recv_count = secure.recv(
                     rt,
                     provision.recv_slice,
@@ -602,8 +527,6 @@ fn connectionLoop(
                             break;
                         },
                     };
-                connection_state.idle = false;
-                if (reused and acceptStopped(control)) break :http_loop;
 
                 provision.zc_recv_buffer.mark_written(recv_count);
                 provision.recv_slice = try provision.zc_recv_buffer.get_write_area(
@@ -624,7 +547,7 @@ fn connectionLoop(
                     }),
                     "\r\n\r\n",
                 )) |header_end| {
-                    const real_header_end = header_end + 4;
+                    const real_header_end = search_area_start + header_end + 4;
                     try provision.request.parse_headers(
                         rt.gpa,
                         // Add 4 to account for the actual header end sequence.
@@ -775,7 +698,7 @@ fn connectionLoop(
                     state = .respond;
                 },
                 .responded => {
-                    if (acceptStopped(control)) break :http_loop;
+                    if (provision.response.connection_close) break :http_loop;
                     const connection = provision.request.headers.get(
                         "Connection",
                     ) orelse "keep-alive";
@@ -792,7 +715,6 @@ fn connectionLoop(
                         keepalive_count += 1;
                     }
 
-                    reused = true;
                     try prepare_new_request(
                         rt.gpa,
                         &state,
@@ -839,7 +761,7 @@ fn connectionLoop(
                 sent += sent_length;
             }
 
-            if (acceptStopped(control)) break :http_loop;
+            if (provision.response.connection_close) break :http_loop;
             const connection = provision.request.headers.get(
                 "Connection",
             ) orelse "keep-alive";
@@ -856,7 +778,6 @@ fn connectionLoop(
                 keepalive_count += 1;
             }
 
-            reused = true;
             try prepare_new_request(
                 rt.gpa,
                 &state,
@@ -1109,6 +1030,10 @@ test "controlled server cancels pending accept and drains" {
                 try Runtime.Timer.delay(rt, .fromMilliseconds(1));
             try Runtime.Timer.delay(rt, .fromMilliseconds(20));
             control.beginDrain();
+            try testing.expect(!control.isDrained());
+            try testing.expectEqual(request.len, try client.send_all(rt, request));
+            const closing_len = try client.recv(rt, &response);
+            try testing.expect(mem.containsAtLeast(u8, response[0..closing_len], 1, "Connection: close"));
             try control.waitDrained(rt, .fromSeconds(2));
             done.* = true;
         }
