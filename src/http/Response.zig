@@ -4,6 +4,7 @@ status: ?Status = null,
 mime: ?Mime = null,
 body: ?[]const u8 = null,
 headers: http.Headers,
+close_signal: ?*const atomic.Value(bool) = null,
 
 // TODO: there shouldn't be a need for this, we should be able to use
 // reponse everywhere or update it to the needed use cases
@@ -47,6 +48,22 @@ pub fn headers_into_writer(
     writer: *Io.Writer,
     content_length: ?usize,
 ) !void {
+    return response.headers_into_writer_connection(
+        writer,
+        content_length,
+        if (response.close_signal) |signal|
+            !signal.load(.acquire)
+        else
+            true,
+    );
+}
+
+pub fn headers_into_writer_connection(
+    response: *Response,
+    writer: *Io.Writer,
+    content_length: ?usize,
+    keep_alive: bool,
+) !void {
     // Status Line
     const status = response.status.?;
     try writer.print(
@@ -55,7 +72,10 @@ pub fn headers_into_writer(
     );
 
     // Headers
-    try writer.writeAll("Server: Zzz\r\nConnection: keep-alive\r\n");
+    try writer.writeAll(if (keep_alive)
+        "Server: Zzz\r\nConnection: keep-alive\r\n"
+    else
+        "Server: Zzz\r\nConnection: close\r\n");
     var iter = response.headers.iterator();
     while (iter.next()) |entry| try writer.print(
         "{s}: {s}\r\n",
@@ -79,6 +99,7 @@ pub fn headers_into_writer(
 
 const std = @import("std");
 const mem = std.mem;
+const atomic = std.atomic;
 const Io = std.Io;
 
 const zzz = @import("zzz");

@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.17.0-dev.1454+5faa79730",
     .dependencies = .{
         .secsock = .{
-            .url = "git+https://github.com/tardy-org/secsock?ref=main#3261e70d67e8a8abc387601c96c406bdf4d9d7ba",
-            .hash = "secsock-0.1.2-dev-p0qurRrfAADLugj7SMHIa4XkwRTgrgjoz3GrWpYyA7B6",
+            .url = "git+https://github.com/fourlexboehm/secsock#add0978d3219a92d60f00c31604375e09333b4c9",
+            .hash = "secsock-0.1.2-dev-p0qurWb9AAA083DhrozwKo-oDAPQjyxm-nOr9ausdsH9",
         },
     },
     .paths = .{

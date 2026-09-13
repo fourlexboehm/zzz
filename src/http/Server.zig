@@ -8,6 +8,131 @@ pub fn init(config: Config) Server {
 
 pub fn deinit(_: *const Server) void {}
 
+pub const Drain = struct {
+    listener: *const Secsock,
+    draining: atomic.Value(bool) = .init(false),
+    expected_runtimes: atomic.Value(usize) = .init(0),
+    registered_runtimes: atomic.Value(usize) = .init(0),
+    canceled_runtimes: atomic.Value(usize) = .init(0),
+    active_tasks: atomic.Value(usize) = .init(0),
+    drain_failed: atomic.Value(bool) = .init(false),
+    close_state: atomic.Value(u8) = .init(listener_open),
+
+    const listener_open: u8 = 0;
+    const listener_closing: u8 = 1;
+    const listener_closed: u8 = 2;
+
+    pub fn init(listener: *const Secsock) Drain {
+        return .{ .listener = listener };
+    }
+
+    pub fn beginDrain(drain: *Drain) void {
+        drain.draining.store(true, .release);
+        drain.closeListenerIfReady();
+    }
+
+    pub fn isDraining(drain: *const Drain) bool {
+        return drain.draining.load(.acquire);
+    }
+
+    pub fn isDrained(drain: *const Drain) bool {
+        return drain.isDraining() and
+            drain.close_state.load(.acquire) == listener_closed and
+            drain.active_tasks.load(.acquire) == 0;
+    }
+
+    pub fn isReady(drain: *const Drain) bool {
+        const expected = drain.expected_runtimes.load(.acquire);
+        return expected != 0 and
+            drain.registered_runtimes.load(.acquire) == expected;
+    }
+
+    pub fn waitDrained(
+        drain: *const Drain,
+        rt: *Runtime,
+        timeout: ?Io.Duration,
+    ) !void {
+        const deadline = drainDeadline(rt.io, timeout);
+        while (true) {
+            if (drain.drain_failed.load(.acquire))
+                return error.DrainFailed;
+            if (drain.isDrained()) return;
+            const delay = nextDrainPoll(rt.io, deadline) orelse
+                return error.DrainTimeout;
+            try Runtime.Timer.delay(rt, delay);
+        }
+    }
+
+    pub fn waitDrainedBlocking(
+        drain: *const Drain,
+        io: Io,
+        timeout: ?Io.Duration,
+    ) !void {
+        const deadline = drainDeadline(io, timeout);
+        while (true) {
+            if (drain.drain_failed.load(.acquire))
+                return error.DrainFailed;
+            if (drain.isDrained()) return;
+            const delay = nextDrainPoll(io, deadline) orelse
+                return error.DrainTimeout;
+            try io.sleep(delay, .awake);
+        }
+    }
+
+    fn registerRuntime(drain: *Drain, expected: usize) void {
+        if (drain.expected_runtimes.cmpxchgStrong(
+            0,
+            expected,
+            .acq_rel,
+            .acquire,
+        )) |existing| debug.assert(existing == expected);
+        const previous = drain.registered_runtimes.fetchAdd(1, .acq_rel);
+        debug.assert(previous < expected);
+        drain.closeListenerIfReady();
+    }
+
+    fn runtimeCanceled(drain: *Drain) void {
+        const previous = drain.canceled_runtimes.fetchAdd(1, .acq_rel);
+        debug.assert(previous < drain.expected_runtimes.load(.acquire));
+        drain.closeListenerIfReady();
+    }
+
+    fn markFailed(drain: *Drain) void {
+        drain.drain_failed.store(true, .release);
+    }
+
+    fn taskStarted(drain: *Drain) void {
+        _ = drain.active_tasks.fetchAdd(1, .acq_rel);
+    }
+
+    fn taskFinished(drain: *Drain) void {
+        const previous = drain.active_tasks.fetchSub(1, .acq_rel);
+        debug.assert(previous > 0);
+    }
+
+    fn closeListenerIfReady(drain: *Drain) void {
+        const expected = drain.expected_runtimes.load(.acquire);
+        if (!drain.isDraining() or
+            expected == 0 or
+            drain.registered_runtimes.load(.acquire) != expected or
+            drain.canceled_runtimes.load(.acquire) != expected)
+            return;
+
+        if (drain.close_state.cmpxchgStrong(
+            listener_open,
+            listener_closing,
+            .acq_rel,
+            .acquire,
+        ) != null) return;
+
+        drain.listener.stopAccepting() catch {
+            drain.markFailed();
+            return;
+        };
+        drain.close_state.store(listener_closed, .release);
+    }
+};
+
 /// Serve an HTTP server.
 pub fn serve(
     server: *const Server,
@@ -15,7 +140,7 @@ pub fn serve(
     router: *const Router,
     tls: *const Secsock,
 ) !void {
-    return serveWithStop(server, rt, router, tls, null);
+    return serveInternal(server, rt, router, tls, .{});
 }
 
 pub fn serveWithStop(
@@ -24,6 +149,31 @@ pub fn serveWithStop(
     router: *const Router,
     tls: *const Secsock,
     stop: ?*const atomic.Value(bool),
+) !void {
+    return serveInternal(server, rt, router, tls, .{
+        .stop = stop,
+    });
+}
+
+pub fn serveWithDrain(
+    server: *const Server,
+    rt: *Runtime,
+    router: *const Router,
+    tls: *const Secsock,
+    drain: *Drain,
+) !void {
+    if (drain.listener != tls) return error.ListenerMismatch;
+    return serveInternal(server, rt, router, tls, .{
+        .drain = drain,
+    });
+}
+
+fn serveInternal(
+    server: *const Server,
+    rt: *Runtime,
+    router: *const Router,
+    tls: *const Secsock,
+    control: ServeControl,
 ) !void {
     const tls_info = tls.info();
     log.info("security mode: {t}", .{tls_info.name});
@@ -75,27 +225,218 @@ pub fn serveWithStop(
         provision.storage = .empty;
         provision.request = .empty;
         provision.response = .empty;
+        provision.response.close_signal = control.stopSignal();
     }
 
-    try rt.spawn(
-        mainLoop,
-        .{
-            rt,
-            server.config,
-            router,
-            tls,
-            provision_pool,
-            connection_count,
-            accept_queued,
-            stop,
-        },
-        server.config.stack_size,
+    if (control.drain) |drain| {
+        const runtime_drain = try rt.gpa.create(RuntimeDrain);
+        errdefer rt.gpa.destroy(runtime_drain);
+        runtime_drain.* = .{};
+
+        var drain_control = control;
+        drain_control.runtime_drain = runtime_drain;
+
+        drain.registerRuntime(rt.count);
+        drain.taskStarted();
+        errdefer {
+            drain.taskFinished();
+            drain.runtimeCanceled();
+        }
+        try rt.spawn(
+            drainRuntime,
+            .{
+                rt,
+                server.config,
+                router,
+                tls,
+                provision_pool,
+                connection_count,
+                accept_queued,
+                drain_control,
+            },
+            server.config.stack_size,
+        );
+        return;
+    }
+
+    try spawnMainLoop(
+        rt,
+        server.config,
+        router,
+        tls,
+        provision_pool,
+        connection_count,
+        accept_queued,
+        control,
     );
 }
 
-fn acceptStopped(stop: ?*const atomic.Value(bool)) bool {
-    const s = stop orelse return false;
-    return s.load(.acquire);
+fn acceptStopped(control: ServeControl) bool {
+    if (control.drain) |drain| return drain.isDraining();
+    const stop = control.stop orelse return false;
+    return stop.load(.acquire);
+}
+
+const ServeControl = struct {
+    stop: ?*const atomic.Value(bool) = null,
+    drain: ?*Drain = null,
+    runtime_drain: ?*RuntimeDrain = null,
+
+    fn taskStarted(control: ServeControl) void {
+        if (control.drain) |drain| drain.taskStarted();
+    }
+
+    fn taskFinished(control: ServeControl) void {
+        if (control.drain) |drain| drain.taskFinished();
+    }
+
+    fn stopSignal(control: ServeControl) ?*const atomic.Value(bool) {
+        if (control.drain) |drain| return &drain.draining;
+        return control.stop;
+    }
+};
+
+const RuntimeDrain = struct {
+    connections: ?*ConnectionState = null,
+    draining: bool = false,
+
+    fn add(
+        runtime_drain: *RuntimeDrain,
+        connection: *ConnectionState,
+    ) bool {
+        if (runtime_drain.draining) return false;
+        connection.next = runtime_drain.connections;
+        if (runtime_drain.connections) |head| head.previous = connection;
+        runtime_drain.connections = connection;
+        return true;
+    }
+
+    fn remove(runtime_drain: *RuntimeDrain, connection: *ConnectionState) void {
+        if (connection.previous) |previous|
+            previous.next = connection.next
+        else
+            runtime_drain.connections = connection.next;
+        if (connection.next) |next| next.previous = connection.previous;
+    }
+
+    fn shutdownIdle(runtime_drain: *RuntimeDrain, rt: *Runtime) !void {
+        var connection = runtime_drain.connections;
+        while (connection) |current| : (connection = current.next) {
+            if (!current.idle) continue;
+            current.idle = false;
+            current.socket.shutdown(rt) catch |err| switch (err) {
+                error.ConnectionAborted,
+                error.ConnectionResetByPeer,
+                error.SocketUnconnected,
+                => {},
+                else => return err,
+            };
+        }
+    }
+};
+
+const ConnectionState = struct {
+    socket: *const Secsock,
+    previous: ?*ConnectionState = null,
+    next: ?*ConnectionState = null,
+    idle: bool = false,
+};
+
+const drain_poll_interval: Io.Duration = .fromMilliseconds(10);
+
+fn drainDeadline(io: Io, timeout: ?Io.Duration) ?Io.Timestamp {
+    const duration = timeout orelse return null;
+    return Io.Clock.awake.now(io).addDuration(duration);
+}
+
+fn nextDrainPoll(io: Io, deadline: ?Io.Timestamp) ?Io.Duration {
+    const end = deadline orelse return drain_poll_interval;
+    const now = Io.Clock.awake.now(io);
+    if (now.compare(.gte, end)) return null;
+
+    const remaining = now.durationTo(end);
+    return .fromNanoseconds(@min(
+        remaining.toNanoseconds(),
+        drain_poll_interval.toNanoseconds(),
+    ));
+}
+
+fn spawnMainLoop(
+    rt: *Runtime,
+    config: Config,
+    router: *const Router,
+    tls: *const Secsock,
+    provisions: *pool.Pool(Provision),
+    connection_count: *usize,
+    accept_queued: *bool,
+    control: ServeControl,
+) !void {
+    control.taskStarted();
+    errdefer control.taskFinished();
+    try rt.spawn(
+        connectionLoop,
+        .{
+            rt,
+            config,
+            router,
+            tls,
+            provisions,
+            connection_count,
+            accept_queued,
+            control,
+        },
+        config.stack_size,
+    );
+}
+
+fn drainRuntime(
+    rt: *Runtime,
+    config: Config,
+    router: *const Router,
+    tls: *const Secsock,
+    provisions: *pool.Pool(Provision),
+    connection_count: *usize,
+    accept_queued: *bool,
+    control: ServeControl,
+) !void {
+    defer control.taskFinished();
+    const drain = control.drain.?;
+    const runtime_drain = control.runtime_drain.?;
+
+    if (!drain.isDraining()) {
+        spawnMainLoop(
+            rt,
+            config,
+            router,
+            tls,
+            provisions,
+            connection_count,
+            accept_queued,
+            control,
+        ) catch |err| {
+            drain.markFailed();
+            drain.runtimeCanceled();
+            return err;
+        };
+    }
+
+    while (!drain.isDraining())
+        Runtime.Timer.delay(rt, drain_poll_interval) catch |err| {
+            drain.markFailed();
+            return err;
+        };
+
+    runtime_drain.draining = true;
+    _ = tls.cancelAccepts(rt) catch |err| {
+        drain.markFailed();
+        return err;
+    };
+    drain.runtimeCanceled();
+
+    runtime_drain.shutdownIdle(rt) catch |err| {
+        drain.markFailed();
+        return err;
+    };
 }
 
 pub fn mainLoop(
@@ -108,25 +449,45 @@ pub fn mainLoop(
     accept_queued: *bool,
     stop: ?*const atomic.Value(bool),
 ) !void {
+    return connectionLoop(
+        rt,
+        config,
+        router,
+        tls,
+        provisions,
+        connection_count,
+        accept_queued,
+        .{ .stop = stop },
+    );
+}
+
+fn connectionLoop(
+    rt: *Runtime,
+    config: Config,
+    router: *const Router,
+    tls: *const Secsock,
+    provisions: *pool.Pool(Provision),
+    connection_count: *usize,
+    accept_queued: *bool,
+    control: ServeControl,
+) !void {
+    defer control.taskFinished();
     accept_queued.* = false;
     var secure = tls.accept(rt) catch |e| {
-        if (!accept_queued.* and !acceptStopped(stop)) {
-            try rt.spawn(
-                mainLoop,
-                .{
-                    rt,
-                    config,
-                    router,
-                    tls,
-                    provisions,
-                    connection_count,
-                    accept_queued,
-                    stop,
-                },
-                config.stack_size,
+        if (!accept_queued.* and !acceptStopped(control)) {
+            try spawnMainLoop(
+                rt,
+                config,
+                router,
+                tls,
+                provisions,
+                connection_count,
+                accept_queued,
+                control,
             );
             accept_queued.* = true;
         }
+        if (e == error.Canceled and acceptStopped(control)) return;
         return e;
     };
     defer secure.deinit(rt.gpa);
@@ -140,20 +501,16 @@ pub fn mainLoop(
     };
 
     log.debug("queuing up a new accept request", .{});
-    if (!acceptStopped(stop)) {
-        try rt.spawn(
-            mainLoop,
-            .{
-                rt,
-                config,
-                router,
-                tls,
-                provisions,
-                connection_count,
-                accept_queued,
-                stop,
-            },
-            config.stack_size,
+    if (!acceptStopped(control)) {
+        try spawnMainLoop(
+            rt,
+            config,
+            router,
+            tls,
+            provisions,
+            connection_count,
+            accept_queued,
+            control,
         );
         accept_queued.* = true;
     }
@@ -161,6 +518,21 @@ pub fn mainLoop(
     const index = try provisions.borrow(rt.gpa);
     defer provisions.release(index);
     const provision = provisions.get_ptr(index);
+
+    var connection_state: ConnectionState = .{ .socket = &secure };
+    if (control.runtime_drain) |runtime_drain| {
+        if (!runtime_drain.add(&connection_state)) {
+            secure.shutdown(rt) catch |err| switch (err) {
+                error.ConnectionAborted,
+                error.ConnectionResetByPeer,
+                error.SocketUnconnected,
+                => {},
+                else => return err,
+            };
+            return;
+        }
+        defer runtime_drain.remove(&connection_state);
+    }
 
     // if we are growing, we can handle a newly allocated provision here.
     // otherwise, it should be initalized.
@@ -190,6 +562,7 @@ pub fn mainLoop(
         provision.storage = .empty;
         provision.request = .empty;
         provision.response = .empty;
+        provision.response.close_signal = control.stopSignal();
         provision.initalized = true;
     }
     defer prepare_new_request(
@@ -207,10 +580,14 @@ pub fn mainLoop(
     );
 
     var keepalive_count: u16 = 0;
+    var reused = false;
 
     http_loop: while (true) switch (state) {
         .request => |*kind| switch (kind.*) {
             .header => {
+                if (reused and acceptStopped(control)) break :http_loop;
+                connection_state.idle =
+                    provision.zc_recv_buffer.len == 0;
                 const recv_count = secure.recv(
                     rt,
                     provision.recv_slice,
@@ -225,6 +602,8 @@ pub fn mainLoop(
                             break;
                         },
                     };
+                connection_state.idle = false;
+                if (reused and acceptStopped(control)) break :http_loop;
 
                 provision.zc_recv_buffer.mark_written(recv_count);
                 provision.recv_slice = try provision.zc_recv_buffer.get_write_area(
@@ -396,6 +775,7 @@ pub fn mainLoop(
                     state = .respond;
                 },
                 .responded => {
+                    if (acceptStopped(control)) break :http_loop;
                     const connection = provision.request.headers.get(
                         "Connection",
                     ) orelse "keep-alive";
@@ -412,6 +792,7 @@ pub fn mainLoop(
                         keepalive_count += 1;
                     }
 
+                    reused = true;
                     try prepare_new_request(
                         rt.gpa,
                         &state,
@@ -427,9 +808,10 @@ pub fn mainLoop(
             const body = provision.response.body orelse "";
             const content_length = body.len;
 
-            try provision.response.headers_into_writer(
+            try provision.response.headers_into_writer_connection(
                 &provision.header_writer,
                 content_length,
+                !acceptStopped(control),
             );
             const headers = provision.header_writer.buffered();
 
@@ -457,6 +839,7 @@ pub fn mainLoop(
                 sent += sent_length;
             }
 
+            if (acceptStopped(control)) break :http_loop;
             const connection = provision.request.headers.get(
                 "Connection",
             ) orelse "keep-alive";
@@ -473,6 +856,7 @@ pub fn mainLoop(
                 keepalive_count += 1;
             }
 
+            reused = true;
             try prepare_new_request(
                 rt.gpa,
                 &state,
@@ -484,20 +868,16 @@ pub fn mainLoop(
 
     log.info("connection ({s}) closed", .{secure_info.address});
 
-    if (!accept_queued.* and !acceptStopped(stop)) {
-        try rt.spawn(
-            mainLoop,
-            .{
-                rt,
-                config,
-                router,
-                tls,
-                provisions,
-                connection_count,
-                accept_queued,
-                stop,
-            },
-            config.stack_size,
+    if (!accept_queued.* and !acceptStopped(control)) {
+        try spawnMainLoop(
+            rt,
+            config,
+            router,
+            tls,
+            provisions,
+            connection_count,
+            accept_queued,
+            control,
         );
         accept_queued.* = true;
     }
@@ -634,6 +1014,110 @@ pub const Provision = struct {
     response: http.Response,
 };
 
+test "controlled server cancels pending accept and drains" {
+    const gpa = std.heap.page_allocator;
+    const port = 38621;
+    const transport: Secsock.Unsecured = .empty;
+    const listener = try transport.tcp(gpa, .{
+        .host = "127.0.0.1",
+        .port = port,
+    });
+    defer listener.deinit(gpa);
+
+    var router: Router = try .init(gpa, &.{}, .{});
+    defer router.deinit(gpa);
+
+    var drain: Drain = .init(&listener);
+    var completed = false;
+
+    const Params = struct {
+        router: *const Router,
+        listener: *const Secsock,
+        drain: *Drain,
+        completed: *bool,
+        port: u16,
+    };
+    const params: Params = .{
+        .router = &router,
+        .listener = &listener,
+        .drain = &drain,
+        .completed = &completed,
+        .port = port,
+    };
+
+    const Tardy = tardy.Tardy(.auto);
+    var td: Tardy = try .init(gpa, testing.io, .{
+        .threading = .{ .multi = 2 },
+    });
+    defer td.deinit();
+
+    try td.entry(params, struct {
+        fn entry(rt: *Runtime, p: Params) !void {
+            const server: Server = .init(.{
+                .stack_size = .@"64KiB",
+                .socket_buffer_size = .@"2KiB",
+            });
+            try server.serveWithDrain(
+                rt,
+                p.router,
+                p.listener,
+                p.drain,
+            );
+            if (rt.id == 0) {
+                try rt.spawn(
+                    exerciseConnection,
+                    .{ rt, p.drain, p.completed, p.port },
+                    .@"64KiB",
+                );
+            }
+        }
+
+        fn exerciseConnection(
+            rt: *Runtime,
+            control: *Drain,
+            done: *bool,
+            port_number: u16,
+        ) !void {
+            var client: Socket = try .init(.{
+                .tcp = .{
+                    .host = "127.0.0.1",
+                    .port = port_number,
+                    .mode = .client,
+                },
+            });
+            defer client.close_blocking();
+            try client.connect(rt);
+
+            const request =
+                "GET / HTTP/1.1\r\nHost: localhost\r\n" ++
+                "Connection: keep-alive\r\n\r\n";
+            try testing.expectEqual(
+                request.len,
+                try client.send_all(rt, request),
+            );
+
+            var response: [1024]u8 = undefined;
+            const response_len = try client.recv(rt, &response);
+            try testing.expect(mem.containsAtLeast(
+                u8,
+                response[0..response_len],
+                1,
+                "Connection: keep-alive",
+            ));
+
+            while (!control.isReady())
+                try Runtime.Timer.delay(rt, .fromMilliseconds(1));
+            try Runtime.Timer.delay(rt, .fromMilliseconds(20));
+            control.beginDrain();
+            try control.waitDrained(rt, .fromSeconds(2));
+            done.* = true;
+        }
+    }.entry);
+
+    try testing.expect(completed);
+    try testing.expect(drain.isDrained());
+}
+
 const log = std.log.scoped(.@"zzz/http/Server");
 
 const std = @import("std");
@@ -641,6 +1125,7 @@ const mem = std.mem;
 const atomic = std.atomic;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const debug = std.debug;
+const testing = std.testing;
 const Io = std.Io;
 const builtin = @import("builtin");
 const tag = builtin.os.tag;
