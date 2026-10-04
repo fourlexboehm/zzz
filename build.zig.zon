@@ -2,7 +2,7 @@
     .name = .zzz,
     .fingerprint = 0xc3273dca261a7ae0,
     .version = "0.3.2-dev",
-    .minimum_zig_version = "0.17.0-dev.1454+5faa79730",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .secsock = .{
             .url = "git+https://github.com/fourlexboehm/secsock#add0978d3219a92d60f00c31604375e09333b4c9",
